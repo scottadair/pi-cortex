@@ -67,6 +67,12 @@ Output format:
 **Gaps** (if NEEDS WORK): Numbered list of specific gaps between plan and implementation.
 ```
 
+## Delegation Strategy
+- Use `parallel` when tasks touch different files/areas (e.g., backend API + frontend UI, or multiple independent modules)
+- Use `chain` when tasks have dependencies (e.g., architect plans → dev implements → qa reviews)
+- Use `run` for single-agent tasks
+- Avoid parallelizing tasks that modify the same files — this causes merge conflicts
+
 ## Constraints
 - You do NOT write code directly
 - You coordinate and delegate

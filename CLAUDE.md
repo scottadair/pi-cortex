@@ -12,8 +12,9 @@ Cortex is a pi coding harness package (`@mariozechner/pi-coding-agent`) that pro
 cortex/
 ├── package.json            # pi package manifest
 ├── extensions/
+│   ├── answer/index.ts     # Q&A extraction and interactive answering (/answer, Ctrl+.)
 │   ├── team/index.ts       # Subagent orchestration (run/parallel/chain/list)
-│   └── todos/index.ts      # Task management with description + plan, /answer Q&A
+│   └── todos/index.ts      # Task management with description + plan
 ├── agents/                 # Team member definitions (markdown + YAML frontmatter)
 │   ├── team-lead.md        # Orchestrator, delegates work
 │   ├── dev-backend.md      # Backend developer, full tool access
@@ -46,14 +47,20 @@ Registers a `team` tool and `/team` command. Spawns isolated `pi` subprocesses p
   4. **Cortex project-local (`.cortex/agents/`)** — project root only, highest priority
 - Agents defined as markdown with YAML frontmatter: `name`, `description`, `tools`, `model`, `thinking`
 
+### Answer (`extensions/answer/`)
+Standalone Q&A extraction and interactive answering. Registers `/answer` command and `Ctrl+.` shortcut.
+- Extracts questions from the last assistant message using a fast model (Codex mini → Haiku → current)
+- Presents an interactive TUI to navigate and answer questions
+- Sends compiled answers back and triggers a new turn
+- Exports `triggerAnswer()` for use by other extensions (e.g. todos refine auto-trigger)
+
 ### Todos (`extensions/todos/`)
-Registers a `todo` tool, `/tasks` command, `/answer` command, and `Ctrl+.` shortcut. Persists as markdown files in `.cortex/todos/`.
+Registers a `todo` tool and `/tasks` command. Persists as markdown files in `.cortex/todos/`.
 - Each todo has three sections: **title** (frontmatter), **description** (markdown), **plan** (full implementation document in markdown)
 - Plans are rich documents with Context, Changes (numbered sections with file paths, line numbers, code snippets), Files to modify, and Verification — not just checklists
 - **Actions**: `create`, `update`, `list`, `get`, `set-description`, `set-plan`, `delete`, `refine`
-- **Refine flow**: agent asks clarifying questions → user answers via `/answer` Q&A TUI → agent updates description and plan
+- **Refine flow**: agent asks clarifying questions → `/answer` Q&A TUI auto-triggers → agent updates description and plan
 - `/tasks` TUI: arrow keys to select, `r` to refine, `w`/Enter to work on a todo
-- `/answer` (or `Ctrl+.`): extracts questions from last assistant message into interactive Q&A
 - Status: `todo`, `in-progress`, `done`, `blocked`. Priority: `low`, `medium`, `high`
 
 ## Writing Extensions

@@ -15,11 +15,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isTmuxAvailable, TmuxPaneManager } from "./tmux.ts";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { type ExtensionAPI, getAgentDir, getMarkdownTheme, parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir, getMarkdownTheme, parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
@@ -309,6 +308,119 @@ function summarizeToolArgs(args: Record<string, unknown>): string {
 	return JSON.stringify(args).slice(0, 50);
 }
 
+// ---------------------------------------------------------------------------
+// Widget-based agent status display
+// ---------------------------------------------------------------------------
+
+interface AgentStatus {
+	name: string;
+	task: string;
+	status: "running" | "done" | "failed";
+	turns: number;
+	cost: number;
+	lastTool?: string;
+	startedAt: number;
+}
+
+class AgentWidgetManager {
+	private agents = new Map<string, AgentStatus>();
+	private ctx: ExtensionContext;
+	private removeTimer?: ReturnType<typeof setTimeout>;
+
+	constructor(ctx: ExtensionContext) {
+		this.ctx = ctx;
+	}
+
+	register(agentId: string, name: string, task: string): void {
+		if (this.removeTimer) {
+			clearTimeout(this.removeTimer);
+			this.removeTimer = undefined;
+		}
+		this.agents.set(agentId, {
+			name,
+			task: task.length > 60 ? task.slice(0, 60) + "..." : task,
+			status: "running",
+			turns: 0,
+			cost: 0,
+			startedAt: Date.now(),
+		});
+		this.render();
+	}
+
+	update(agentId: string, patch: Partial<AgentStatus>): void {
+		const agent = this.agents.get(agentId);
+		if (agent) {
+			Object.assign(agent, patch);
+			this.render();
+		}
+	}
+
+	complete(agentId: string, success: boolean): void {
+		const agent = this.agents.get(agentId);
+		if (agent) {
+			agent.status = success ? "done" : "failed";
+			this.render();
+		}
+		const allDone = [...this.agents.values()].every((a) => a.status !== "running");
+		if (allDone) {
+			this.removeTimer = setTimeout(() => this.cleanup(), 3000);
+		}
+	}
+
+	cleanup(): void {
+		if (this.removeTimer) {
+			clearTimeout(this.removeTimer);
+			this.removeTimer = undefined;
+		}
+		if (this.ctx.hasUI) {
+			this.ctx.ui.setWidget("team-agents", undefined);
+		}
+	}
+
+	private render(): void {
+		if (!this.ctx.hasUI) return;
+
+		const entries = [...this.agents.values()];
+		const running = entries.filter((a) => a.status === "running").length;
+		const total = entries.length;
+		const maxNameLen = Math.max(...entries.map((a) => a.name.length), 0);
+
+		const lines: string[] = [];
+		const header = running > 0
+			? `Team \u2500 ${running}/${total} running`
+			: `Team \u2500 ${total} done`;
+		lines.push(header);
+
+		// Sort: running first, then done/failed
+		const sorted = [...entries].sort((a, b) => {
+			if (a.status === "running" && b.status !== "running") return -1;
+			if (a.status !== "running" && b.status === "running") return 1;
+			return 0;
+		});
+
+		for (const agent of sorted) {
+			const name = agent.name.padEnd(maxNameLen);
+			const elapsed = Math.round((Date.now() - agent.startedAt) / 1000);
+			const elapsedStr = elapsed >= 60
+				? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
+				: `${elapsed}s`;
+
+			let status: string;
+			if (agent.status === "running") status = "\u25B6 running";
+			else if (agent.status === "done") status = "\u2713 done  ";
+			else status = "\u2717 failed";
+
+			const turnsCost = `Turn ${agent.turns} | $${agent.cost.toFixed(2)}`;
+			const tool = agent.lastTool ? ` | ${agent.lastTool}` : "";
+			const toolTruncated = tool.length > 40 ? tool.slice(0, 40) + "..." : tool;
+
+			lines.push(`  ${name}  ${status}  ${turnsCost}${toolTruncated}  ${elapsedStr}`);
+		}
+
+		this.ctx.ui.setWidget("team-agents", lines, { placement: "aboveEditor" });
+	}
+}
+
 async function runSingleAgent(
 	defaultCwd: string,
 	agents: AgentConfig[],
@@ -318,7 +430,7 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => TeamDetails,
-	tmux?: TmuxPaneManager,
+	widget?: AgentWidgetManager,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -357,10 +469,8 @@ async function runSingleAgent(
 	};
 
 	const agentId = `${agentName}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-	if (tmux) {
-		tmux.createPane(agentId, agentName);
-		tmux.writeLog(agentId, `Task: ${task.slice(0, 200)}`);
-		tmux.writeLog(agentId, "---");
+	if (widget) {
+		widget.register(agentId, agentName, task);
 	}
 
 	const emitUpdate = () => {
@@ -422,17 +532,19 @@ async function runSingleAgent(
 						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 					}
 
-					if (tmux && msg.role === "assistant") {
+					if (widget && msg.role === "assistant") {
 						const content = (msg.content ?? []) as Array<Record<string, any>>;
+						let lastTool: string | undefined;
 						for (const part of content) {
 							if (part.type === "toolCall") {
-								tmux.writeLog(agentId, `> ${part.name} ${summarizeToolArgs(part.arguments ?? {})}`);
-							} else if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
-								const firstLine = part.text.trim().split("\n")[0];
-								tmux.writeLog(agentId, firstLine.length > 80 ? firstLine.slice(0, 80) + "..." : firstLine);
+								lastTool = `${part.name} ${summarizeToolArgs(part.arguments ?? {})}`;
 							}
 						}
-						tmux.writeLog(agentId, `[Turn ${currentResult.usage.turns} | $${currentResult.usage.cost.toFixed(4)}]`);
+						widget.update(agentId, {
+							turns: currentResult.usage.turns,
+							cost: currentResult.usage.cost,
+							...(lastTool ? { lastTool } : {}),
+						});
 					}
 
 					emitUpdate();
@@ -478,10 +590,8 @@ async function runSingleAgent(
 		currentResult.exitCode = exitCode;
 		if (wasAborted) throw new Error("Agent was aborted");
 
-		if (tmux) {
-			const status = currentResult.exitCode === 0 ? "Completed" : "Failed";
-			tmux.writeLog(agentId, `---\n${status} (exit ${currentResult.exitCode})`);
-			tmux.removePane(agentId);
+		if (widget) {
+			widget.complete(agentId, currentResult.exitCode === 0);
 		}
 
 		// Save agent output to file so callers can reference it by path
@@ -510,9 +620,8 @@ async function runSingleAgent(
 
 		return currentResult;
 	} catch (err) {
-		if (tmux) {
-			tmux.writeLog(agentId, "---\nAborted");
-			tmux.removePane(agentId);
+		if (widget) {
+			widget.complete(agentId, false);
 		}
 		throw err;
 	} finally {
@@ -561,9 +670,9 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const effectiveCwd = params.cwd || ctx.cwd;
 			const { agents } = discoverAgents(effectiveCwd);
-			const tmux = isTmuxAvailable() ? new TmuxPaneManager() : undefined;
-			if (tmux && signal) {
-				signal.addEventListener("abort", () => tmux.cleanup(), { once: true });
+			const widget = ctx.hasUI ? new AgentWidgetManager(ctx) : undefined;
+			if (widget && signal) {
+				signal.addEventListener("abort", () => widget.cleanup(), { once: true });
 			}
 
 			const makeDetails =
@@ -611,7 +720,7 @@ export default function (pi: ExtensionAPI) {
 
 					const result = await runSingleAgent(
 						effectiveCwd, agents, step.agent, taskWithContext,
-						i + 1, signal, chainUpdate, makeDetails("chain"), tmux,
+						i + 1, signal, chainUpdate, makeDetails("chain"), widget,
 					);
 					results.push(result);
 
@@ -685,7 +794,7 @@ export default function (pi: ExtensionAPI) {
 								emitParallelUpdate();
 							}
 						},
-						makeDetails("parallel"), tmux,
+						makeDetails("parallel"), widget,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -716,7 +825,7 @@ export default function (pi: ExtensionAPI) {
 
 				const result = await runSingleAgent(
 					effectiveCwd, agents, params.agent, params.task,
-					undefined, signal, onUpdate, makeDetails("single"), tmux,
+					undefined, signal, onUpdate, makeDetails("single"), widget,
 				);
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 				if (isError) {
