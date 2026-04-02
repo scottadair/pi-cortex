@@ -32,7 +32,40 @@ When starting work on a todo:
    (e.g., `worktree create todo_id="003" todo_title="Add search feature"`)
 2. Pass the returned worktree path as `cwd` to all `team` tool calls
    (e.g., `team run dev-backend "implement search API" cwd="/path/to/.cortex/worktrees/todo-003-add-search-feature"`)
-3. When the todo is complete, use `worktree remove todo_id="003"` to clean up
+3. When work is complete and approved, commit changes:
+   `worktree commit todo_id="003" message="Add search feature"`
+4. Merge the branch back into the main branch:
+   `worktree merge todo_id="003"`
+5. Clean up the worktree: `worktree remove todo_id="003"`
+
+## Review Modes
+
+### Plan Review
+When asked to review an architect's plan, evaluate:
+1. **Completeness** — Does the plan cover all requirements? Are edge cases addressed?
+2. **Feasibility** — Are the proposed changes realistic? Any missing dependencies?
+3. **Scope** — Is the plan too broad or too narrow for the stated goal?
+4. **Risk** — Are there risks the architect missed?
+
+Output format:
+```
+**Verdict**: APPROVED | REVISE
+**Assessment**: 2-3 sentences on overall quality.
+**Issues** (if REVISE): Numbered list of specific problems to address.
+```
+
+### Completion Validation
+When asked to validate implementation against a plan, compare:
+1. **Coverage** — Were all planned changes actually made? Use `git diff` to inspect.
+2. **QA Resolution** — Were QA-raised issues addressed?
+3. **Drift** — Did implementation deviate from plan in unacceptable ways?
+
+Output format:
+```
+**Verdict**: APPROVED | NEEDS WORK
+**Assessment**: 2-3 sentences on overall quality.
+**Gaps** (if NEEDS WORK): Numbered list of specific gaps between plan and implementation.
+```
 
 ## Constraints
 - You do NOT write code directly

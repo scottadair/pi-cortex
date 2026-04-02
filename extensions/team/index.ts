@@ -10,7 +10,7 @@
  *   - List: { action: "list" }
  */
 
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -222,6 +222,7 @@ interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	outputFile?: string;
 }
 
 interface TeamDetails {
@@ -437,6 +438,31 @@ async function runSingleAgent(
 
 		currentResult.exitCode = exitCode;
 		if (wasAborted) throw new Error("Agent was aborted");
+
+		// Save agent output to file so callers can reference it by path
+		const finalText = getFinalOutput(currentResult.messages);
+		if (finalText && currentResult.exitCode === 0) {
+			const outputDir = path.join(defaultCwd, ".cortex", "team-outputs");
+			fs.mkdirSync(outputDir, { recursive: true });
+
+			// Ensure .cortex/team-outputs/ is git-excluded
+			try {
+				const repoRoot = execSync("git rev-parse --show-toplevel", { cwd: defaultCwd, encoding: "utf-8" }).trim();
+				const excludePath = path.join(repoRoot, ".git", "info", "exclude");
+				const pattern = ".cortex/team-outputs/";
+				const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf-8") : "";
+				if (!existing.includes(pattern)) {
+					fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+					fs.appendFileSync(excludePath, `\n${pattern}\n`);
+				}
+			} catch { /* not a git repo or exclude failed — non-critical */ }
+
+			const safeName = agentName.replace(/[^\w.-]+/g, "_");
+			const outputPath = path.join(outputDir, `${safeName}-${Date.now()}.md`);
+			fs.writeFileSync(outputPath, finalText, "utf-8");
+			currentResult.outputFile = outputPath;
+		}
+
 		return currentResult;
 	} finally {
 		if (tmpPath) try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
@@ -544,8 +570,11 @@ export default function (pi: ExtensionAPI) {
 					}
 					previousOutput = getFinalOutput(result.messages);
 				}
+				const lastResult = results[results.length - 1];
+				const chainOutput = getFinalOutput(lastResult.messages) || "(no output)";
+				const chainFileSuffix = lastResult.outputFile ? `\n\n[Full output saved to: ${lastResult.outputFile}]` : "";
 				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+					content: [{ type: "text", text: chainOutput + chainFileSuffix }],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -642,8 +671,10 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
+				const output = getFinalOutput(result.messages) || "(no output)";
+				const fileSuffix = result.outputFile ? `\n\n[Full output saved to: ${result.outputFile}]` : "";
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [{ type: "text", text: output + fileSuffix }],
 					details: makeDetails("single")([result]),
 				};
 			}

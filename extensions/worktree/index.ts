@@ -6,6 +6,8 @@
  *
  * Actions:
  *   - create: Create a worktree for a todo (branch: todo/<id>-<slug>)
+ *   - commit: Commit all changes in a todo's worktree
+ *   - merge: Merge a todo's branch into the base branch
  *   - remove: Remove a todo's worktree and optionally its branch
  *   - list: List all active worktrees
  */
@@ -93,12 +95,13 @@ function parseWorktreeList(cwd: string): WorktreeInfo[] {
 // ---------------------------------------------------------------------------
 
 const WorktreeParams = Type.Object({
-	action: StringEnum(["create", "remove", "list"] as const, {
+	action: StringEnum(["create", "commit", "merge", "remove", "list"] as const, {
 		description: "Action to perform",
 	}),
-	todo_id: Type.Optional(Type.String({ description: "Todo ID (for create/remove)" })),
+	todo_id: Type.Optional(Type.String({ description: "Todo ID (for create/remove/commit/merge)" })),
 	todo_title: Type.Optional(Type.String({ description: "Todo title (for create, used to derive branch name)" })),
-	base: Type.Optional(Type.String({ description: "Base ref to branch from (for create, defaults to HEAD)" })),
+	message: Type.Optional(Type.String({ description: "Commit message (for commit, auto-generated if omitted)" })),
+	base: Type.Optional(Type.String({ description: "Base ref to branch from (for create) or merge into (for merge). Defaults to HEAD / main worktree branch." })),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -107,7 +110,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Worktree",
 		description: [
 			"Manage git worktrees for todo isolation.",
-			"Actions: create (new worktree for a todo), remove (clean up a todo's worktree), list (show all worktrees).",
+			"Actions: create (new worktree), commit (stage & commit all changes), merge (merge todo branch into base), remove (clean up worktree), list (show all).",
 			"Each todo gets its own branch (todo/<id>-<slug>) and working directory under .cortex/worktrees/.",
 		].join(" "),
 		parameters: WorktreeParams,
@@ -187,6 +190,113 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: `Created worktree at ${wtPath} on branch ${branch}` }],
 					details: { path: wtPath, branch, existed: false },
+				};
+			}
+
+			if (params.action === "commit") {
+				if (!params.todo_id) {
+					return {
+						content: [{ type: "text", text: "Commit requires todo_id." }],
+						details: {},
+						isError: true,
+					};
+				}
+
+				// Find the worktree by matching todo ID prefix
+				const entries = parseWorktreeList(repoRoot);
+				const prefix = `todo-${params.todo_id}-`;
+				const match = entries.find((e) => {
+					const dirName = path.basename(e.path);
+					return dirName.startsWith(prefix);
+				});
+
+				if (!match) {
+					return {
+						content: [{ type: "text", text: `No worktree found for todo ${params.todo_id}.` }],
+						details: {},
+						isError: true,
+					};
+				}
+
+				// Check if there are any changes to commit
+				const status = execSync("git status --porcelain", { cwd: match.path, encoding: "utf-8" }).trim();
+				if (!status) {
+					return {
+						content: [{ type: "text", text: "No changes to commit." }],
+						details: { path: match.path, branch: match.branch },
+					};
+				}
+
+				const commitMsg = params.message || `${match.branch.replace("todo/", "").replace(/^\d+-/, "").replace(/-/g, " ")}`;
+
+				try {
+					execSync("git add -A", { cwd: match.path, encoding: "utf-8" });
+					execSync(`git commit -m ${JSON.stringify(commitMsg)}`, { cwd: match.path, encoding: "utf-8" });
+				} catch (err: any) {
+					return {
+						content: [{ type: "text", text: `Failed to commit: ${err.message}` }],
+						details: {},
+						isError: true,
+					};
+				}
+
+				return {
+					content: [{ type: "text", text: `Committed changes in ${match.path} on branch ${match.branch}: "${commitMsg}"` }],
+					details: { path: match.path, branch: match.branch, message: commitMsg },
+				};
+			}
+
+			if (params.action === "merge") {
+				if (!params.todo_id) {
+					return {
+						content: [{ type: "text", text: "Merge requires todo_id." }],
+						details: {},
+						isError: true,
+					};
+				}
+
+				// Find the worktree by matching todo ID prefix
+				const entries = parseWorktreeList(repoRoot);
+				const prefix = `todo-${params.todo_id}-`;
+				const match = entries.find((e) => {
+					const dirName = path.basename(e.path);
+					return dirName.startsWith(prefix);
+				});
+
+				if (!match || !match.branch) {
+					return {
+						content: [{ type: "text", text: `No worktree/branch found for todo ${params.todo_id}.` }],
+						details: {},
+						isError: true,
+					};
+				}
+
+				// Check for uncommitted changes in the worktree
+				const status = execSync("git status --porcelain", { cwd: match.path, encoding: "utf-8" }).trim();
+				if (status) {
+					return {
+						content: [{ type: "text", text: `Worktree has uncommitted changes. Run worktree commit first.\n${status}` }],
+						details: { path: match.path, branch: match.branch },
+						isError: true,
+					};
+				}
+
+				// Determine the base branch (current branch of the main worktree)
+				const baseBranch = params.base || execSync("git rev-parse --abbrev-ref HEAD", { cwd: repoRoot, encoding: "utf-8" }).trim();
+
+				try {
+					execSync(`git merge ${match.branch}`, { cwd: repoRoot, encoding: "utf-8" });
+				} catch (err: any) {
+					return {
+						content: [{ type: "text", text: `Failed to merge ${match.branch} into ${baseBranch}: ${err.message}` }],
+						details: {},
+						isError: true,
+					};
+				}
+
+				return {
+					content: [{ type: "text", text: `Merged ${match.branch} into ${baseBranch}` }],
+					details: { branch: match.branch, baseBranch },
 				};
 			}
 

@@ -14,16 +14,24 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { complete, type Model, type Api, type UserMessage, StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry, Theme } from "@mariozechner/pi-coding-agent";
-import { BorderedLoader } from "@mariozechner/pi-coding-agent";
+import { BorderedLoader, DynamicBorder, copyToClipboard, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import {
 	type Component,
+	Container,
+	type Focusable,
 	Editor,
 	type EditorTheme,
+	Input,
 	Key,
+	Markdown,
 	matchesKey,
+	type SelectItem,
+	SelectList,
+	Spacer,
 	Text,
 	truncateToWidth,
 	type TUI,
+	fuzzyMatch,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
@@ -144,7 +152,7 @@ function writeTodo(cwd: string, todo: TodoFile): void {
 	fs.writeFileSync(path.join(dir, `${todo.meta.id}.md`), serializeTodoFile(todo), "utf-8");
 }
 
-function deleteTodo(cwd: string, id: string): boolean {
+function deleteTodoFile(cwd: string, id: string): boolean {
 	const filePath = path.join(getTodosDir(cwd), `${id}.md`);
 	if (!fs.existsSync(filePath)) return false;
 	fs.unlinkSync(filePath);
@@ -177,6 +185,51 @@ const PRIORITY_LABELS: Record<string, string> = {
 	medium: "\u2500",  // ─
 	low: "\u2193",    // ↓
 };
+
+// ---------------------------------------------------------------------------
+// Todo search / filter helpers
+// ---------------------------------------------------------------------------
+
+function buildTodoSearchText(todo: TodoFile): string {
+	const tags = (todo.meta.tags ?? []).join(" ");
+	const assignee = todo.meta.assignee ? `@${todo.meta.assignee}` : "";
+	return `#${todo.meta.id} ${todo.meta.title} ${tags} ${todo.meta.status} ${assignee}`.trim();
+}
+
+function filterTodos(todos: TodoFile[], query: string): TodoFile[] {
+	const trimmed = query.trim();
+	if (!trimmed) return todos;
+
+	const tokens = trimmed.split(/\s+/).filter(Boolean);
+	if (tokens.length === 0) return todos;
+
+	const matches: Array<{ todo: TodoFile; score: number }> = [];
+	for (const todo of todos) {
+		const text = buildTodoSearchText(todo);
+		let totalScore = 0;
+		let matched = true;
+		for (const token of tokens) {
+			const result = fuzzyMatch(token, text);
+			if (!result.matches) {
+				matched = false;
+				break;
+			}
+			totalScore += result.score;
+		}
+		if (matched) {
+			matches.push({ todo, score: totalScore });
+		}
+	}
+
+	return matches
+		.sort((a, b) => {
+			const aDone = a.todo.meta.status === "done";
+			const bDone = b.todo.meta.status === "done";
+			if (aDone !== bDone) return aDone ? 1 : -1;
+			return a.score - b.score;
+		})
+		.map((m) => m.todo);
+}
 
 // ---------------------------------------------------------------------------
 // Q&A extraction for /answer command
@@ -437,126 +490,482 @@ class QnAComponent implements Component {
 }
 
 // ---------------------------------------------------------------------------
-// Tasks TUI with selection
+// Todo selector TUI component
 // ---------------------------------------------------------------------------
 
-type TaskAction = "refine" | "work" | null;
+type TodoMenuAction = "work" | "refine" | "view" | "close" | "reopen" | "delete" | "copyPath" | "copyText";
 
-class TodoListComponent {
-	private todos: TodoFile[];
+class TodoSelectorComponent extends Container implements Focusable {
+	private searchInput: Input;
+	private listContainer: Container;
+	private allTodos: TodoFile[];
+	private filteredTodos: TodoFile[];
+	private selectedIndex = 0;
+	private onSelectCallback: (todo: TodoFile) => void;
+	private onCancelCallback: () => void;
+	private tui: TUI;
 	private theme: Theme;
-	private onClose: (action: TaskAction, todo?: TodoFile) => void;
-	private selectedIndex: number = 0;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
+	private headerText: Text;
+	private hintText: Text;
 
-	constructor(todos: TodoFile[], theme: Theme, onClose: (action: TaskAction, todo?: TodoFile) => void) {
-		this.todos = todos;
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		this.searchInput.focused = value;
+	}
+
+	constructor(
+		tui: TUI,
+		theme: Theme,
+		todos: TodoFile[],
+		onSelect: (todo: TodoFile) => void,
+		onCancel: () => void,
+		initialSearch?: string,
+		private onQuickAction?: (todo: TodoFile, action: "work" | "refine") => void,
+	) {
+		super();
+		this.tui = tui;
 		this.theme = theme;
-		this.onClose = onClose;
+		this.allTodos = todos;
+		this.filteredTodos = todos;
+		this.onSelectCallback = onSelect;
+		this.onCancelCallback = onCancel;
+
+		this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		this.addChild(new Spacer(1));
+
+		this.headerText = new Text("", 1, 0);
+		this.addChild(this.headerText);
+		this.addChild(new Spacer(1));
+
+		this.searchInput = new Input();
+		if (initialSearch) {
+			this.searchInput.setValue(initialSearch);
+		}
+		this.searchInput.onSubmit = () => {
+			const selected = this.filteredTodos[this.selectedIndex];
+			if (selected) this.onSelectCallback(selected);
+		};
+		this.addChild(this.searchInput);
+
+		this.addChild(new Spacer(1));
+		this.listContainer = new Container();
+		this.addChild(this.listContainer);
+
+		this.addChild(new Spacer(1));
+		this.hintText = new Text("", 1, 0);
+		this.addChild(this.hintText);
+		this.addChild(new Spacer(1));
+		this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+		this.updateHeader();
+		this.updateHints();
+		this.applyFilter(this.searchInput.getValue());
 	}
 
-	private getOpenTodos(): TodoFile[] {
-		return this.todos.filter((t) => t.meta.status !== "done");
+	setTodos(todos: TodoFile[]): void {
+		this.allTodos = todos;
+		this.updateHeader();
+		this.applyFilter(this.searchInput.getValue());
+		this.tui.requestRender();
 	}
 
-	handleInput(data: string): void {
-		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
-			this.onClose(null);
+	private updateHeader(): void {
+		const openCount = this.allTodos.filter((t) => t.meta.status !== "done").length;
+		const closedCount = this.allTodos.length - openCount;
+		const title = `Todos (${openCount} open, ${closedCount} done)`;
+		this.headerText.setText(this.theme.fg("accent", this.theme.bold(title)));
+	}
+
+	private updateHints(): void {
+		this.hintText.setText(
+			this.theme.fg(
+				"dim",
+				"Type to search \u00b7 \u2191\u2193 select \u00b7 Enter actions \u00b7 Ctrl+Shift+W work \u00b7 Ctrl+Shift+R refine \u00b7 Esc close",
+			),
+		);
+	}
+
+	private applyFilter(query: string): void {
+		this.filteredTodos = filterTodos(this.allTodos, query);
+		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredTodos.length - 1));
+		this.updateList();
+	}
+
+	private updateList(): void {
+		this.listContainer.clear();
+
+		if (this.filteredTodos.length === 0) {
+			this.listContainer.addChild(new Text(this.theme.fg("muted", "  No matching todos"), 0, 0));
 			return;
 		}
 
-		const openTodos = this.getOpenTodos();
-		if (openTodos.length === 0) {
-			this.onClose(null);
-			return;
+		const maxVisible = 10;
+		const startIndex = Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredTodos.length - maxVisible),
+		);
+		const endIndex = Math.min(startIndex + maxVisible, this.filteredTodos.length);
+
+		for (let i = startIndex; i < endIndex; i++) {
+			const todo = this.filteredTodos[i];
+			if (!todo) continue;
+			const isSelected = i === this.selectedIndex;
+			const isDone = todo.meta.status === "done";
+			const prefix = isSelected ? this.theme.fg("accent", "\u25b6 ") : "  ";
+			const icon = STATUS_ICONS[todo.meta.status] ?? "\u25cb";
+			const statusColor = todo.meta.status === "blocked" ? "error" : isDone ? "dim" : "muted";
+			const titleColor = isSelected ? "accent" : isDone ? "dim" : "text";
+			const priority = todo.meta.priority ? PRIORITY_LABELS[todo.meta.priority] || "" : "";
+			const assignee = todo.meta.assignee ? this.theme.fg("dim", ` @${todo.meta.assignee}`) : "";
+			const planInfo = todo.plan ? this.theme.fg("dim", " [plan]") : "";
+			const tagText = todo.meta.tags?.length ? this.theme.fg("muted", ` [${todo.meta.tags.join(", ")}]`) : "";
+			const idText = isSelected ? this.theme.fg("accent", `#${todo.meta.id}`) : this.theme.fg("muted", `#${todo.meta.id}`);
+
+			const line =
+				prefix +
+				this.theme.fg(statusColor, icon) +
+				" " +
+				idText +
+				" " +
+				(priority ? this.theme.fg("warning", priority) + " " : "") +
+				this.theme.fg(titleColor, todo.meta.title) +
+				tagText +
+				planInfo +
+				assignee +
+				" " +
+				this.theme.fg(statusColor === "dim" ? "dim" : "success", `(${todo.meta.status})`);
+
+			this.listContainer.addChild(new Text(line, 0, 0));
 		}
 
-		if (matchesKey(data, Key.up)) {
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-			this.invalidate();
-			return;
+		if (startIndex > 0 || endIndex < this.filteredTodos.length) {
+			const scrollInfo = this.theme.fg(
+				"dim",
+				`  (${this.selectedIndex + 1}/${this.filteredTodos.length})`,
+			);
+			this.listContainer.addChild(new Text(scrollInfo, 0, 0));
 		}
-		if (matchesKey(data, Key.down)) {
-			this.selectedIndex = Math.min(openTodos.length - 1, this.selectedIndex + 1);
-			this.invalidate();
-			return;
-		}
+	}
 
-		if (data === "r" && openTodos.length > 0) {
-			this.onClose("refine", openTodos[this.selectedIndex]);
+	handleInput(keyData: string): void {
+		if (matchesKey(keyData, Key.up)) {
+			if (this.filteredTodos.length === 0) return;
+			this.selectedIndex = this.selectedIndex === 0 ? this.filteredTodos.length - 1 : this.selectedIndex - 1;
+			this.updateList();
+			this.tui.requestRender();
 			return;
 		}
-		if ((data === "w" || matchesKey(data, Key.enter)) && openTodos.length > 0) {
-			this.onClose("work", openTodos[this.selectedIndex]);
+		if (matchesKey(keyData, Key.down)) {
+			if (this.filteredTodos.length === 0) return;
+			this.selectedIndex = this.selectedIndex === this.filteredTodos.length - 1 ? 0 : this.selectedIndex + 1;
+			this.updateList();
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(keyData, Key.enter)) {
+			const selected = this.filteredTodos[this.selectedIndex];
+			if (selected) this.onSelectCallback(selected);
+			return;
+		}
+		if (matchesKey(keyData, Key.escape) || matchesKey(keyData, Key.ctrl("c"))) {
+			this.onCancelCallback();
+			return;
+		}
+		if (matchesKey(keyData, Key.ctrlShift("r"))) {
+			const selected = this.filteredTodos[this.selectedIndex];
+			if (selected && this.onQuickAction) this.onQuickAction(selected, "refine");
+			return;
+		}
+		if (matchesKey(keyData, Key.ctrlShift("w"))) {
+			const selected = this.filteredTodos[this.selectedIndex];
+			if (selected && this.onQuickAction) this.onQuickAction(selected, "work");
+			return;
+		}
+		this.searchInput.handleInput(keyData);
+		this.applyFilter(this.searchInput.getValue());
+		this.tui.requestRender();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.updateHeader();
+		this.updateHints();
+		this.updateList();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Todo action menu component
+// ---------------------------------------------------------------------------
+
+class TodoActionMenuComponent extends Container {
+	private selectList: SelectList;
+	private onSelectCallback: (action: TodoMenuAction) => void;
+	private onCancelCallback: () => void;
+
+	constructor(
+		theme: Theme,
+		todo: TodoFile,
+		onSelect: (action: TodoMenuAction) => void,
+		onCancel: () => void,
+	) {
+		super();
+		this.onSelectCallback = onSelect;
+		this.onCancelCallback = onCancel;
+
+		const isDone = todo.meta.status === "done";
+		const title = todo.meta.title || "(untitled)";
+		const options: SelectItem[] = [
+			{ value: "view", label: "view", description: "View todo details" },
+			{ value: "work", label: "work", description: "Work on todo" },
+			{ value: "refine", label: "refine", description: "Refine task with Q&A" },
+			...(isDone
+				? [{ value: "reopen", label: "reopen", description: "Reopen todo" }]
+				: [{ value: "close", label: "close", description: "Mark as done" }]),
+			{ value: "copyPath", label: "copy path", description: "Copy file path to clipboard" },
+			{ value: "copyText", label: "copy text", description: "Copy title and body to clipboard" },
+			{ value: "delete", label: "delete", description: "Delete todo" },
+		];
+
+		this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		this.addChild(
+			new Text(
+				theme.fg("accent", theme.bold(`Actions for #${todo.meta.id} "${title}"`)),
+			),
+		);
+
+		this.selectList = new SelectList(options, options.length, {
+			selectedPrefix: (text) => theme.fg("accent", text),
+			selectedText: (text) => theme.fg("accent", text),
+			description: (text) => theme.fg("muted", text),
+			scrollInfo: (text) => theme.fg("dim", text),
+			noMatch: (text) => theme.fg("warning", text),
+		});
+
+		this.selectList.onSelect = (item) => this.onSelectCallback(item.value as TodoMenuAction);
+		this.selectList.onCancel = () => this.onCancelCallback();
+
+		this.addChild(this.selectList);
+		this.addChild(new Text(theme.fg("dim", "Enter to confirm \u00b7 Esc back")));
+		this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+	}
+
+	handleInput(keyData: string): void {
+		this.selectList.handleInput(keyData);
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Todo delete confirmation component
+// ---------------------------------------------------------------------------
+
+class TodoDeleteConfirmComponent extends Container {
+	private selectList: SelectList;
+
+	constructor(theme: Theme, message: string, onConfirm: (confirmed: boolean) => void) {
+		super();
+
+		const options: SelectItem[] = [
+			{ value: "yes", label: "Yes" },
+			{ value: "no", label: "No" },
+		];
+
+		this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		this.addChild(new Text(theme.fg("accent", message)));
+
+		this.selectList = new SelectList(options, options.length, {
+			selectedPrefix: (text) => theme.fg("accent", text),
+			selectedText: (text) => theme.fg("accent", text),
+			description: (text) => theme.fg("muted", text),
+			scrollInfo: (text) => theme.fg("dim", text),
+			noMatch: (text) => theme.fg("warning", text),
+		});
+
+		this.selectList.onSelect = (item) => onConfirm(item.value === "yes");
+		this.selectList.onCancel = () => onConfirm(false);
+
+		this.addChild(this.selectList);
+		this.addChild(new Text(theme.fg("dim", "Enter to confirm \u00b7 Esc back")));
+		this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+	}
+
+	handleInput(keyData: string): void {
+		this.selectList.handleInput(keyData);
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Todo detail overlay component
+// ---------------------------------------------------------------------------
+
+type TodoOverlayAction = "back" | "work";
+
+class TodoDetailOverlayComponent {
+	private todo: TodoFile;
+	private theme: Theme;
+	private tui: TUI;
+	private markdown: Markdown;
+	private scrollOffset = 0;
+	private viewHeight = 0;
+	private totalLines = 0;
+	private onAction: (action: TodoOverlayAction) => void;
+
+	constructor(
+		tui: TUI,
+		theme: Theme,
+		todo: TodoFile,
+		onAction: (action: TodoOverlayAction) => void,
+	) {
+		this.tui = tui;
+		this.theme = theme;
+		this.todo = todo;
+		this.onAction = onAction;
+		this.markdown = new Markdown(this.getMarkdownText(), 1, 0, getMarkdownTheme());
+	}
+
+	private getMarkdownText(): string {
+		const parts: string[] = [];
+		if (this.todo.description) {
+			parts.push("## Description\n" + this.todo.description);
+		}
+		if (this.todo.plan) {
+			parts.push("## Plan\n" + this.todo.plan);
+		}
+		return parts.length > 0 ? parts.join("\n\n") : "_No details yet._";
+	}
+
+	handleInput(keyData: string): void {
+		if (matchesKey(keyData, Key.escape) || matchesKey(keyData, Key.ctrl("c"))) {
+			this.onAction("back");
+			return;
+		}
+		if (matchesKey(keyData, Key.enter)) {
+			this.onAction("work");
+			return;
+		}
+		if (matchesKey(keyData, Key.up)) {
+			this.scrollBy(-1);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(keyData, Key.down)) {
+			this.scrollBy(1);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(keyData, Key.left)) {
+			this.scrollBy(-(this.viewHeight || 1));
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(keyData, Key.right)) {
+			this.scrollBy(this.viewHeight || 1);
+			this.tui.requestRender();
 			return;
 		}
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		const maxHeight = Math.max(10, Math.floor((this.tui.terminal.rows || 24) * 0.8));
+		const headerLines = 3;
+		const footerLines = 3;
+		const borderLines = 2;
+		const innerWidth = Math.max(10, width - 2);
+		const contentHeight = Math.max(1, maxHeight - headerLines - footerLines - borderLines);
 
+		const markdownLines = this.markdown.render(innerWidth);
+		this.totalLines = markdownLines.length;
+		this.viewHeight = contentHeight;
+		const maxScroll = Math.max(0, this.totalLines - contentHeight);
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+
+		const visibleLines = markdownLines.slice(this.scrollOffset, this.scrollOffset + contentHeight);
 		const lines: string[] = [];
-		const th = this.theme;
 
-		lines.push("");
-		const title = th.fg("accent", " Tasks ");
-		lines.push(truncateToWidth(th.fg("borderMuted", "\u2500".repeat(3)) + title + th.fg("borderMuted", "\u2500".repeat(Math.max(0, width - 12))), width));
-		lines.push("");
-
-		if (this.todos.length === 0) {
-			lines.push(truncateToWidth(`  ${th.fg("dim", "No tasks yet.")}`, width));
+		// Title line
+		const titleText = ` ${this.todo.meta.title || `Todo #${this.todo.meta.id}`} `;
+		const titleWidth = visibleWidth(titleText);
+		if (titleWidth >= innerWidth) {
+			lines.push(truncateToWidth(this.theme.fg("accent", titleText.trim()), innerWidth));
 		} else {
-			const openTodos = this.getOpenTodos();
-			const doneTodos = this.todos.filter((t) => t.meta.status === "done");
-
-			const groups: Record<string, TodoFile[]> = { "todo": [], "in-progress": [], "blocked": [] };
-			for (const t of openTodos) {
-				(groups[t.meta.status] ?? groups["todo"]).push(t);
-			}
-
-			let flatIndex = 0;
-			for (const [status, items] of Object.entries(groups)) {
-				if (items.length === 0) continue;
-				lines.push(truncateToWidth(`  ${th.fg("accent", status.toUpperCase())} ${th.fg("dim", `(${items.length})`)}`, width));
-				for (const t of items) {
-					const icon = STATUS_ICONS[t.meta.status] ?? "\u25cb";
-					const statusColor = t.meta.status === "blocked" ? "error" : "muted";
-					const priority = t.meta.priority ? PRIORITY_LABELS[t.meta.priority] || "" : "";
-					const assignee = t.meta.assignee ? th.fg("dim", ` @${t.meta.assignee}`) : "";
-					const planInfo = t.plan ? th.fg("dim", " [plan]") : "";
-					const titleText = th.fg("text", t.meta.title);
-					const cursor = flatIndex === this.selectedIndex ? th.fg("accent", "\u25b6 ") : "  ";
-					const highlight = flatIndex === this.selectedIndex ? th.fg("accent", `#${t.meta.id}`) : th.fg("muted", `#${t.meta.id}`);
-					lines.push(truncateToWidth(`  ${cursor}${th.fg(statusColor, icon)} ${highlight} ${priority ? th.fg("warning", priority) + " " : ""}${titleText}${planInfo}${assignee}`, width));
-					flatIndex++;
-				}
-				lines.push("");
-			}
-
-			if (doneTodos.length > 0) {
-				lines.push(truncateToWidth(`  ${th.fg("success", "DONE")} ${th.fg("dim", `(${doneTodos.length})`)}`, width));
-				for (const t of doneTodos.slice(0, 3)) {
-					lines.push(truncateToWidth(`    ${th.fg("success", "\u2713")} ${th.fg("dim", `#${t.meta.id}`)} ${th.fg("dim", t.meta.title)}`, width));
-				}
-				if (doneTodos.length > 3) {
-					lines.push(truncateToWidth(`    ${th.fg("dim", `... ${doneTodos.length - 3} more`)}`, width));
-				}
-				lines.push("");
-			}
+			const leftWidth = Math.max(0, Math.floor((innerWidth - titleWidth) / 2));
+			const rightWidth = Math.max(0, innerWidth - titleWidth - leftWidth);
+			lines.push(
+				this.theme.fg("borderMuted", "\u2500".repeat(leftWidth)) +
+				this.theme.fg("accent", titleText) +
+				this.theme.fg("borderMuted", "\u2500".repeat(rightWidth)),
+			);
 		}
 
-		lines.push(truncateToWidth(`  ${th.fg("dim", "\u2191\u2193 select \u00b7 r refine \u00b7 w/Enter work \u00b7 Esc close")}`, width));
+		// Meta line
+		const icon = STATUS_ICONS[this.todo.meta.status] ?? "\u25cb";
+		const statusColor = this.todo.meta.status === "done" ? "dim" : this.todo.meta.status === "blocked" ? "error" : "success";
+		const priority = this.todo.meta.priority ? ` ${PRIORITY_LABELS[this.todo.meta.priority] || ""}` : "";
+		const assignee = this.todo.meta.assignee ? ` @${this.todo.meta.assignee}` : "";
+		const tagText = this.todo.meta.tags?.length ? ` [${this.todo.meta.tags.join(", ")}]` : "";
+		lines.push(
+			this.theme.fg("accent", `#${this.todo.meta.id}`) +
+			this.theme.fg("muted", " \u00b7 ") +
+			this.theme.fg(statusColor, `${icon} ${this.todo.meta.status}`) +
+			this.theme.fg("warning", priority) +
+			this.theme.fg("muted", tagText) +
+			this.theme.fg("dim", assignee),
+		);
 		lines.push("");
 
-		this.cachedWidth = width;
-		this.cachedLines = lines;
-		return lines;
+		// Content
+		for (const line of visibleLines) {
+			lines.push(truncateToWidth(line, innerWidth));
+		}
+		while (lines.length < headerLines + contentHeight) {
+			lines.push("");
+		}
+
+		// Footer
+		lines.push("");
+		const workHint = this.theme.fg("accent", "enter") + this.theme.fg("muted", " work");
+		const backHint = this.theme.fg("dim", "esc back");
+		const navHint = this.theme.fg("dim", "\u2191/\u2193 scroll \u00b7 \u2190/\u2192 page");
+		let footerLine = [workHint, backHint, navHint].join(this.theme.fg("muted", " \u00b7 "));
+		if (this.totalLines > this.viewHeight) {
+			const start = Math.min(this.totalLines, this.scrollOffset + 1);
+			const end = Math.min(this.totalLines, this.scrollOffset + this.viewHeight);
+			footerLine += this.theme.fg("dim", ` ${start}-${end}/${this.totalLines}`);
+		}
+		lines.push(footerLine);
+
+		// Frame with border
+		const borderColor = (text: string) => this.theme.fg("borderMuted", text);
+		const top = borderColor(`\u250c${"\u2500".repeat(innerWidth)}\u2510`);
+		const bottom = borderColor(`\u2514${"\u2500".repeat(innerWidth)}\u2518`);
+		const framedLines = lines.map((line) => {
+			const truncated = truncateToWidth(line, innerWidth);
+			const padding = Math.max(0, innerWidth - visibleWidth(truncated));
+			return borderColor("\u2502") + truncated + " ".repeat(padding) + borderColor("\u2502");
+		});
+
+		return [top, ...framedLines, bottom].map((line) => truncateToWidth(line, width));
 	}
 
 	invalidate(): void {
-		this.cachedWidth = undefined;
-		this.cachedLines = undefined;
+		this.markdown = new Markdown(this.getMarkdownText(), 1, 0, getMarkdownTheme());
+	}
+
+	private scrollBy(delta: number): void {
+		const maxScroll = Math.max(0, this.totalLines - this.viewHeight);
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset + delta, maxScroll));
 	}
 }
 
@@ -585,6 +994,7 @@ const TodoParams = Type.Object({
 	title: Type.Optional(Type.String({ description: "Todo title (for create, update)" })),
 	description: Type.Optional(Type.String({ description: "Description text (for create, set-description)" })),
 	plan: Type.Optional(Type.String({ description: "Full implementation plan as markdown (for create, set-plan). Include Context, Changes (with file paths and code), Files to modify, and Verification sections." })),
+	plan_file: Type.Optional(Type.String({ description: "Path to file containing the plan (alternative to inline plan). Use the output file path from a team run. The file is deleted after reading." })),
 	status: Type.Optional(StringEnum(["todo", "in-progress", "done", "blocked"] as const, {
 		description: "Status (for create, update)",
 	})),
@@ -598,6 +1008,10 @@ const TodoParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	// Track whether the current turn was initiated by a refine action,
+	// so we can auto-open the /answer Q&A TUI when the agent responds.
+	let refineInProgress = false;
+
 	pi.registerTool({
 		name: "todo",
 		label: "Todo",
@@ -605,11 +1019,11 @@ export default function (pi: ExtensionAPI) {
 			"Manage project tasks stored in .cortex/todos/. Each todo has a title, description, and plan.",
 			"The plan is a full implementation document in markdown — not just a checklist.",
 			"A good plan includes: Context (why), Changes (numbered sections with specific file paths, line numbers, code snippets), Files to modify, and Verification (how to test).",
-			"Actions: create (title, description?, plan?, assignee?, priority?, tags?),",
+			"Actions: create (title, description?, plan? or plan_file?, assignee?, priority?, tags?),",
 			"update (id, status?, assignee?, priority?, title?, tags?),",
 			"list (filter_status?, filter_assignee?), get (id),",
 			"set-description (id, description) - replace the description,",
-			"set-plan (id, plan) - replace the full plan document,",
+			"set-plan (id, plan or plan_file) - replace the full plan document,",
 			"delete (id), refine (id) - ask user clarifying questions to build description and plan.",
 			"Status: todo, in-progress, done, blocked. Priority: low, medium, high.",
 			"Assignees are team member names: team-lead, dev-backend, dev-frontend, architect, qa.",
@@ -618,6 +1032,19 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const cwd = ctx.cwd;
+
+			function resolvePlan(): string {
+				if (params.plan_file) {
+					try {
+						const content = fs.readFileSync(params.plan_file, "utf-8");
+						try { fs.unlinkSync(params.plan_file); } catch { /* ignore cleanup failure */ }
+						return content;
+					} catch (err: any) {
+						throw new Error(`Could not read plan file: ${params.plan_file} - ${err.message}`);
+					}
+				}
+				return params.plan ?? "";
+			}
 
 			switch (params.action) {
 				case "create": {
@@ -638,7 +1065,7 @@ export default function (pi: ExtensionAPI) {
 							updated_at: now,
 						},
 						description: params.description ?? "",
-						plan: params.plan ?? "",
+						plan: resolvePlan(),
 					};
 					writeTodo(cwd, todo);
 					const planInfo = todo.plan ? " (with plan)" : "";
@@ -743,7 +1170,7 @@ export default function (pi: ExtensionAPI) {
 					if (!todo) {
 						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
 					}
-					todo.plan = params.plan ?? "";
+					todo.plan = resolvePlan();
 					todo.meta.updated_at = new Date().toISOString();
 					writeTodo(cwd, todo);
 					return {
@@ -761,6 +1188,7 @@ export default function (pi: ExtensionAPI) {
 					if (!todo) {
 						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
 					}
+					refineInProgress = true;
 					let context = `# Refining Todo #${todo.meta.id}: ${todo.meta.title}\n\n`;
 					context += `**Current status**: ${todo.meta.status}\n`;
 					if (todo.meta.assignee) context += `**Assignee**: ${todo.meta.assignee}\n`;
@@ -782,7 +1210,7 @@ export default function (pi: ExtensionAPI) {
 					if (!params.id) {
 						return { content: [{ type: "text", text: "Error: id required for delete" }], details: {} };
 					}
-					const deleted = deleteTodo(cwd, params.id);
+					const deleted = deleteTodoFile(cwd, params.id);
 					return {
 						content: [{ type: "text", text: deleted ? `Deleted todo #${params.id}` : `Todo #${params.id} not found` }],
 						details: { action: "delete", id: params.id, deleted },
@@ -827,37 +1255,267 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// -----------------------------------------------------------------------
-	// /tasks command — interactive TUI with refine/work actions
+	// /tasks and /todo commands — interactive TUI with selector, action menu,
+	// detail overlay, and delete confirmation
 	// -----------------------------------------------------------------------
+
+	const todosHandler = async (_args: string | undefined, ctx: ExtensionContext) => {
+		if (!ctx.hasUI) {
+			ctx.ui.notify("/todo requires interactive mode", "error");
+			return;
+		}
+
+		const cwd = ctx.cwd;
+		const searchTerm = (_args ?? "").trim();
+		let nextPrompt: string | null = null;
+		let rootTui: TUI | null = null;
+
+		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+			rootTui = tui;
+			let selector: TodoSelectorComponent | null = null;
+			let actionMenu: TodoActionMenuComponent | null = null;
+			let deleteConfirm: TodoDeleteConfirmComponent | null = null;
+			let activeComponent:
+				| {
+						render: (width: number) => string[];
+						invalidate: () => void;
+						handleInput?: (data: string) => void;
+						focused?: boolean;
+					}
+				| null = null;
+			let wrapperFocused = false;
+
+			const setActiveComponent = (
+				component:
+					| {
+							render: (width: number) => string[];
+							invalidate: () => void;
+							handleInput?: (data: string) => void;
+							focused?: boolean;
+						}
+					| null,
+			) => {
+				if (activeComponent && "focused" in activeComponent) {
+					activeComponent.focused = false;
+				}
+				activeComponent = component;
+				if (activeComponent && "focused" in activeComponent) {
+					activeComponent.focused = wrapperFocused;
+				}
+				tui.requestRender();
+			};
+
+			const copyTodoPathToClipboard = (todoId: string) => {
+				const filePath = path.join(getTodosDir(cwd), `${todoId}.md`);
+				const absolutePath = path.resolve(filePath);
+				try {
+					copyToClipboard(absolutePath);
+					ctx.ui.notify(`Copied ${absolutePath} to clipboard`, "info");
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(message, "error");
+				}
+			};
+
+			const copyTodoTextToClipboard = (todo: TodoFile) => {
+				const title = todo.meta.title || "(untitled)";
+				const parts: string[] = [`# ${title}`];
+				if (todo.description) parts.push(`\n## Description\n${todo.description}`);
+				if (todo.plan) parts.push(`\n## Plan\n${todo.plan}`);
+				const text = parts.join("\n");
+				try {
+					copyToClipboard(text);
+					ctx.ui.notify("Copied todo text to clipboard", "info");
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(message, "error");
+				}
+			};
+
+			const openTodoOverlay = async (todo: TodoFile): Promise<TodoOverlayAction> => {
+				const action = await ctx.ui.custom<TodoOverlayAction>(
+					(overlayTui, overlayTheme, _overlayKb, overlayDone) =>
+						new TodoDetailOverlayComponent(
+							overlayTui,
+							overlayTheme,
+							todo,
+							overlayDone,
+						),
+					{
+						overlay: true,
+						overlayOptions: { width: "80%", maxHeight: "80%", anchor: "center" },
+					},
+				);
+
+				return action ?? "back";
+			};
+
+			const applyTodoAction = async (
+				todo: TodoFile,
+				action: TodoMenuAction,
+			): Promise<"stay" | "exit"> => {
+				if (action === "refine") {
+					nextPrompt = buildRefinePrompt(todo.meta.id, todo.meta.title);
+					refineInProgress = true;
+					done();
+					return "exit";
+				}
+				if (action === "work") {
+					nextPrompt = `Work on todo #${todo.meta.id} "${todo.meta.title}"`;
+					done();
+					return "exit";
+				}
+				if (action === "view") {
+					return "stay";
+				}
+				if (action === "copyPath") {
+					copyTodoPathToClipboard(todo.meta.id);
+					return "stay";
+				}
+				if (action === "copyText") {
+					copyTodoTextToClipboard(todo);
+					return "stay";
+				}
+				if (action === "close") {
+					todo.meta.status = "done";
+					todo.meta.updated_at = new Date().toISOString();
+					writeTodo(cwd, todo);
+					const updatedTodos = readAllTodos(cwd);
+					selector?.setTodos(updatedTodos);
+					ctx.ui.notify(`Closed todo #${todo.meta.id}`, "info");
+					return "stay";
+				}
+				if (action === "reopen") {
+					todo.meta.status = "todo";
+					todo.meta.updated_at = new Date().toISOString();
+					writeTodo(cwd, todo);
+					const updatedTodos = readAllTodos(cwd);
+					selector?.setTodos(updatedTodos);
+					ctx.ui.notify(`Reopened todo #${todo.meta.id}`, "info");
+					return "stay";
+				}
+				if (action === "delete") {
+					deleteTodoFile(cwd, todo.meta.id);
+					const updatedTodos = readAllTodos(cwd);
+					selector?.setTodos(updatedTodos);
+					ctx.ui.notify(`Deleted todo #${todo.meta.id}`, "info");
+					return "stay";
+				}
+				return "stay";
+			};
+
+			const handleActionSelection = async (todo: TodoFile, action: TodoMenuAction) => {
+				if (action === "view") {
+					const overlayAction = await openTodoOverlay(todo);
+					if (overlayAction === "work") {
+						await applyTodoAction(todo, "work");
+						return;
+					}
+					if (actionMenu) {
+						setActiveComponent(actionMenu);
+					}
+					return;
+				}
+
+				if (action === "delete") {
+					const message = `Delete todo #${todo.meta.id}? This cannot be undone.`;
+					deleteConfirm = new TodoDeleteConfirmComponent(theme, message, (confirmed) => {
+						if (!confirmed) {
+							setActiveComponent(actionMenu);
+							return;
+						}
+						void (async () => {
+							await applyTodoAction(todo, "delete");
+							setActiveComponent(selector);
+						})();
+					});
+					setActiveComponent(deleteConfirm);
+					return;
+				}
+
+				const result = await applyTodoAction(todo, action);
+				if (result === "stay") {
+					setActiveComponent(selector);
+				}
+			};
+
+			const showActionMenu = (todo: TodoFile) => {
+				actionMenu = new TodoActionMenuComponent(
+					theme,
+					todo,
+					(action) => {
+						void handleActionSelection(todo, action);
+					},
+					() => {
+						setActiveComponent(selector);
+					},
+				);
+				setActiveComponent(actionMenu);
+			};
+
+			const todos = readAllTodos(cwd);
+
+			selector = new TodoSelectorComponent(
+				tui,
+				theme,
+				todos,
+				(todo) => {
+					showActionMenu(todo);
+				},
+				() => done(),
+				searchTerm || undefined,
+				(todo, action) => {
+					const title = todo.meta.title || "(untitled)";
+					if (action === "refine") {
+						nextPrompt = buildRefinePrompt(todo.meta.id, title);
+						refineInProgress = true;
+					} else {
+						nextPrompt = `Work on todo #${todo.meta.id} "${title}"`;
+					}
+					done();
+				},
+			);
+
+			setActiveComponent(selector);
+
+			const rootComponent = {
+				get focused() {
+					return wrapperFocused;
+				},
+				set focused(value: boolean) {
+					wrapperFocused = value;
+					if (activeComponent && "focused" in activeComponent) {
+						activeComponent.focused = value;
+					}
+				},
+				render(width: number) {
+					return activeComponent ? activeComponent.render(width) : [];
+				},
+				invalidate() {
+					activeComponent?.invalidate();
+				},
+				handleInput(data: string) {
+					activeComponent?.handleInput?.(data);
+				},
+			};
+
+			return rootComponent;
+		});
+
+		if (nextPrompt) {
+			ctx.ui.setEditorText(nextPrompt);
+			rootTui?.requestRender();
+		}
+	};
 
 	pi.registerCommand("tasks", {
 		description: "Show all tasks — select one to refine or work on",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("/tasks requires interactive mode", "error");
-				return;
-			}
+		handler: todosHandler,
+	});
 
-			const todos = readAllTodos(ctx.cwd);
-			let nextPrompt: string | null = null;
-
-			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
-				return new TodoListComponent(todos, theme, (action, todo) => {
-					if (action && todo) {
-						if (action === "refine") {
-							nextPrompt = buildRefinePrompt(todo.meta.id, todo.meta.title);
-						} else if (action === "work") {
-							nextPrompt = `Work on todo #${todo.meta.id} "${todo.meta.title}"`;
-						}
-					}
-					done();
-				});
-			});
-
-			if (nextPrompt) {
-				ctx.ui.setEditorText(nextPrompt);
-			}
-		},
+	pi.registerCommand("todo", {
+		description: "Show all tasks — select one to refine or work on",
+		handler: todosHandler,
 	});
 
 	// -----------------------------------------------------------------------
@@ -959,7 +1617,7 @@ export default function (pi: ExtensionAPI) {
 		pi.sendMessage(
 			{
 				customType: "answers",
-				content: "I answered your questions:\n\n" + answersResult,
+				content: "I answered your questions in the following way:\n\n" + answersResult,
 				display: true,
 			},
 			{ triggerTurn: true },
@@ -974,5 +1632,18 @@ export default function (pi: ExtensionAPI) {
 	pi.registerShortcut("ctrl+.", {
 		description: "Extract and answer questions",
 		handler: answerHandler,
+	});
+
+	// -----------------------------------------------------------------------
+	// Auto-trigger /answer after a refine turn completes
+	// -----------------------------------------------------------------------
+
+	pi.on("turn_end", async (_event, ctx) => {
+		if (!refineInProgress) return;
+		refineInProgress = false;
+		if (!ctx.hasUI) return;
+		// Small delay to let the UI finish rendering the assistant response
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		await answerHandler(ctx);
 	});
 }
