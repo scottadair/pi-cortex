@@ -12,6 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isTmuxAvailable, openEditorPane } from "../team/tmux.ts";
 import { complete, type Model, type Api, type UserMessage, StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry, Theme } from "@mariozechner/pi-coding-agent";
 import { BorderedLoader, DynamicBorder, copyToClipboard, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
@@ -493,7 +494,7 @@ class QnAComponent implements Component {
 // Todo selector TUI component
 // ---------------------------------------------------------------------------
 
-type TodoMenuAction = "work" | "refine" | "view" | "close" | "reopen" | "delete" | "copyPath" | "copyText";
+type TodoMenuAction = "work" | "refine" | "view" | "edit" | "close" | "reopen" | "delete" | "copyPath" | "copyText";
 
 class TodoSelectorComponent extends Container implements Focusable {
 	private searchInput: Input;
@@ -721,6 +722,7 @@ class TodoActionMenuComponent extends Container {
 		const title = todo.meta.title || "(untitled)";
 		const options: SelectItem[] = [
 			{ value: "view", label: "view", description: "View todo details" },
+			...(isTmuxAvailable() ? [{ value: "edit", label: "edit", description: "Edit in vim (tmux)" }] : []),
 			{ value: "work", label: "work", description: "Work on todo" },
 			{ value: "refine", label: "refine", description: "Refine task with Q&A" },
 			...(isDone
@@ -1366,6 +1368,11 @@ export default function (pi: ExtensionAPI) {
 					return "exit";
 				}
 				if (action === "view") {
+					return "stay";
+				}
+				if (action === "edit") {
+					const filePath = path.resolve(path.join(getTodosDir(cwd), `${todo.meta.id}.md`));
+					openEditorPane(filePath);
 					return "stay";
 				}
 				if (action === "copyPath") {

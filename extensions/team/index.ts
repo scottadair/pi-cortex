@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isTmuxAvailable, TmuxPaneManager } from "./tmux.ts";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
 import { StringEnum } from "@mariozechner/pi-ai";
@@ -292,6 +293,16 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 
 type OnUpdateCallback = (partial: AgentToolResult<TeamDetails>) => void;
 
+function summarizeToolArgs(args: Record<string, unknown>): string {
+	const cmd = args.command as string | undefined;
+	if (cmd) return cmd.length > 60 ? cmd.slice(0, 60) + "..." : cmd;
+	const filePath = (args.file_path || args.path) as string | undefined;
+	if (filePath) return filePath;
+	const pattern = args.pattern as string | undefined;
+	if (pattern) return `/${pattern}/`;
+	return JSON.stringify(args).slice(0, 50);
+}
+
 async function runSingleAgent(
 	defaultCwd: string,
 	agents: AgentConfig[],
@@ -301,6 +312,7 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => TeamDetails,
+	tmux?: TmuxPaneManager,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -337,6 +349,13 @@ async function runSingleAgent(
 		model: agent.model,
 		step,
 	};
+
+	const agentId = `${agentName}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+	if (tmux) {
+		tmux.createPane(agentId, agentName);
+		tmux.writeLog(agentId, `Task: ${task.slice(0, 200)}`);
+		tmux.writeLog(agentId, "---");
+	}
 
 	const emitUpdate = () => {
 		if (onUpdate) {
@@ -396,6 +415,20 @@ async function runSingleAgent(
 						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 					}
+
+					if (tmux && msg.role === "assistant") {
+						const content = (msg.content ?? []) as Array<Record<string, any>>;
+						for (const part of content) {
+							if (part.type === "toolCall") {
+								tmux.writeLog(agentId, `> ${part.name} ${summarizeToolArgs(part.arguments ?? {})}`);
+							} else if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
+								const firstLine = part.text.trim().split("\n")[0];
+								tmux.writeLog(agentId, firstLine.length > 80 ? firstLine.slice(0, 80) + "..." : firstLine);
+							}
+						}
+						tmux.writeLog(agentId, `[Turn ${currentResult.usage.turns} | $${currentResult.usage.cost.toFixed(4)}]`);
+					}
+
 					emitUpdate();
 				}
 
@@ -439,6 +472,12 @@ async function runSingleAgent(
 		currentResult.exitCode = exitCode;
 		if (wasAborted) throw new Error("Agent was aborted");
 
+		if (tmux) {
+			const status = currentResult.exitCode === 0 ? "Completed" : "Failed";
+			tmux.writeLog(agentId, `---\n${status} (exit ${currentResult.exitCode})`);
+			tmux.removePane(agentId);
+		}
+
 		// Save agent output to file so callers can reference it by path
 		const finalText = getFinalOutput(currentResult.messages);
 		if (finalText && currentResult.exitCode === 0) {
@@ -464,6 +503,12 @@ async function runSingleAgent(
 		}
 
 		return currentResult;
+	} catch (err) {
+		if (tmux) {
+			tmux.writeLog(agentId, "---\nAborted");
+			tmux.removePane(agentId);
+		}
+		throw err;
 	} finally {
 		if (tmpPath) try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
 		if (tmpDir) try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }
@@ -509,6 +554,10 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const effectiveCwd = params.cwd || ctx.cwd;
 			const { agents } = discoverAgents(effectiveCwd);
+			const tmux = isTmuxAvailable() ? new TmuxPaneManager() : undefined;
+			if (tmux && signal) {
+				signal.addEventListener("abort", () => tmux.cleanup(), { once: true });
+			}
 
 			const makeDetails =
 				(mode: TeamDetails["mode"]) =>
@@ -555,7 +604,7 @@ export default function (pi: ExtensionAPI) {
 
 					const result = await runSingleAgent(
 						effectiveCwd, agents, step.agent, taskWithContext,
-						i + 1, signal, chainUpdate, makeDetails("chain"),
+						i + 1, signal, chainUpdate, makeDetails("chain"), tmux,
 					);
 					results.push(result);
 
@@ -629,7 +678,7 @@ export default function (pi: ExtensionAPI) {
 								emitParallelUpdate();
 							}
 						},
-						makeDetails("parallel"),
+						makeDetails("parallel"), tmux,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -660,7 +709,7 @@ export default function (pi: ExtensionAPI) {
 
 				const result = await runSingleAgent(
 					effectiveCwd, agents, params.agent, params.task,
-					undefined, signal, onUpdate, makeDetails("single"),
+					undefined, signal, onUpdate, makeDetails("single"), tmux,
 				);
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 				if (isError) {
