@@ -466,6 +466,7 @@ const TeamParams = Type.Object({
 	task: Type.Optional(Type.String({ description: "Task description (for run mode)" })),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	steps: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential chain execution" })),
+	cwd: Type.Optional(Type.String({ description: "Working directory override. Use to run agents in a git worktree." })),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -480,7 +481,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: TeamParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const { agents } = discoverAgents(ctx.cwd);
+			const effectiveCwd = params.cwd || ctx.cwd;
+			const { agents } = discoverAgents(effectiveCwd);
 
 			const makeDetails =
 				(mode: TeamDetails["mode"]) =>
@@ -526,7 +528,7 @@ export default function (pi: ExtensionAPI) {
 						: undefined;
 
 					const result = await runSingleAgent(
-						ctx.cwd, agents, step.agent, taskWithContext,
+						effectiveCwd, agents, step.agent, taskWithContext,
 						i + 1, signal, chainUpdate, makeDetails("chain"),
 					);
 					results.push(result);
@@ -590,7 +592,7 @@ export default function (pi: ExtensionAPI) {
 
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
 					const result = await runSingleAgent(
-						ctx.cwd, agents, t.agent, t.task,
+						effectiveCwd, agents, t.agent, t.task,
 						undefined, signal,
 						(partial) => {
 							if (partial.details?.results[0]) {
@@ -628,7 +630,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				const result = await runSingleAgent(
-					ctx.cwd, agents, params.agent, params.task,
+					effectiveCwd, agents, params.agent, params.task,
 					undefined, signal, onUpdate, makeDetails("single"),
 				);
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";

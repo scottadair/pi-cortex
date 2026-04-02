@@ -25,23 +25,33 @@ Use the `todo` tool to create a task. Save the architect's full output as the pl
 todo create title="<feature name>" description="<one-line summary>" plan="<full plan markdown from architect>"
 ```
 
-## 3. Implement
-Run the appropriate developer agent for each change section in the plan:
+## 3. Create Worktree
+Create an isolated worktree for the implementation so changes happen on a separate branch:
 
 ```
-team run dev-backend "<specific task referencing the plan's change section>"
-team run dev-frontend "<specific task referencing the plan's change section>"
+worktree create todo_id="<id>" todo_title="<feature name>"
 ```
 
-## 4. QA Review
-After implementation, run the QA agent to review all changes:
+Note the returned worktree path — pass it as `cwd` to all subsequent team tool calls.
+
+## 4. Implement
+Run the appropriate developer agent for each change section in the plan, using the worktree `cwd`:
 
 ```
-team run qa "Review the implementation of <feature>. Run tests and check for issues."
+team run dev-backend "<specific task referencing the plan's change section>" cwd="<worktree path>"
+team run dev-frontend "<specific task referencing the plan's change section>" cwd="<worktree path>"
 ```
 
-## 5. Finalize
-Update the todo status when QA passes:
+## 5. QA Review
+After implementation, run the QA agent to review all changes in the worktree:
+
+```
+team run qa "Review the implementation of <feature>. Run tests and check for issues." cwd="<worktree path>"
+```
+
+## 6. Finalize
+Update the todo status when QA passes and clean up the worktree:
 ```
 todo update id="<id>" status="done"
+worktree remove todo_id="<id>"
 ```
