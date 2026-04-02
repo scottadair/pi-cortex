@@ -16,11 +16,26 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message, Model } from "@mariozechner/pi-ai";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir, getMarkdownTheme, parseFrontmatter } from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+import { type ExtensionAPI, type ExtensionContext, DynamicBorder, copyToClipboard, getAgentDir, getMarkdownTheme, parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import {
+	Container,
+	type Focusable,
+	fuzzyMatch,
+	Input,
+	Key,
+	Markdown,
+	matchesKey,
+	type SelectItem,
+	SelectList,
+	Spacer,
+	Text,
+	type TUI,
+} from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { stringify as stringifyYaml } from "yaml";
+import { isTmuxAvailable, openEditorPane } from "./tmux.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -29,6 +44,165 @@ import { Type } from "@sinclair/typebox";
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
+
+// ---------------------------------------------------------------------------
+// Agent management helpers
+// ---------------------------------------------------------------------------
+
+function getProjectAgentsDir(cwd: string): string {
+	return path.join(cwd, ".cortex", "agents");
+}
+
+function ensureProjectAgentsDir(cwd: string): string {
+	const dir = getProjectAgentsDir(cwd);
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+function serializeAgentFile(frontmatter: Record<string, any>, body: string): string {
+	const yaml = stringifyYaml(frontmatter).trim();
+	return `---\n${yaml}\n---\n\n${body}`;
+}
+
+function copyAgentToProject(cwd: string, agent: AgentConfig): string {
+	try {
+		const dir = ensureProjectAgentsDir(cwd);
+		const fileName = `${agent.name}.md`;
+		const destPath = path.join(dir, fileName);
+		
+		const content = fs.readFileSync(agent.filePath, "utf-8");
+		fs.writeFileSync(destPath, content, "utf-8");
+		
+		return destPath;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Failed to copy agent to project: ${message}`);
+	}
+}
+
+function createAgentOverride(cwd: string, agent: AgentConfig): AgentConfig {
+	const newPath = copyAgentToProject(cwd, agent);
+	return {
+		...agent,
+		source: "project",
+		filePath: newPath,
+	};
+}
+
+function updateAgentFrontmatter(
+	agent: AgentConfig,
+	updates: { model?: string; tools?: string[]; thinking?: string }
+): void {
+	try {
+		const content = fs.readFileSync(agent.filePath, "utf-8");
+		const { frontmatter, body } = parseFrontmatter<Record<string, any>>(content);
+		
+		if (updates.model !== undefined) {
+			frontmatter.model = updates.model;
+		}
+		
+		if (updates.tools !== undefined) {
+			frontmatter.tools = updates.tools.join(", ");
+		}
+		
+		if (updates.thinking !== undefined) {
+			if (updates.thinking === "") {
+				delete frontmatter.thinking;
+			} else {
+				frontmatter.thinking = updates.thinking;
+			}
+		}
+		
+		const serialized = serializeAgentFile(frontmatter, body);
+		fs.writeFileSync(agent.filePath, serialized, "utf-8");
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Failed to update agent configuration: ${message}`);
+	}
+}
+
+function deleteProjectAgent(cwd: string, agentName: string): boolean {
+	try {
+		const filePath = path.join(getProjectAgentsDir(cwd), `${agentName}.md`);
+		if (!fs.existsSync(filePath)) return false;
+		fs.unlinkSync(filePath);
+		return true;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Failed to delete agent: ${message}`);
+	}
+}
+
+interface AgentTemplate {
+	name: string;
+	description: string;
+	path: string;
+}
+
+function getAvailableTemplates(): AgentTemplate[] {
+	const __dirname = path.dirname(fileURLToPath(import.meta.url));
+	const templatesDir = path.resolve(__dirname, "../../templates/agents");
+	
+	if (!fs.existsSync(templatesDir)) return [];
+	
+	const templates: AgentTemplate[] = [];
+	for (const entry of fs.readdirSync(templatesDir, { withFileTypes: true })) {
+		if (!entry.name.endsWith(".md") || !entry.isFile()) continue;
+		
+		const filePath = path.join(templatesDir, entry.name);
+		try {
+			const content = fs.readFileSync(filePath, "utf-8");
+			const { frontmatter } = parseFrontmatter<Record<string, string>>(content);
+			
+			if (frontmatter.description) {
+				templates.push({
+					name: entry.name.replace(/\.md$/, ""),
+					description: frontmatter.description,
+					path: filePath,
+				});
+			}
+		} catch {
+			continue;
+		}
+	}
+	
+	return templates.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function createAgentFromTemplate(cwd: string, name: string, templatePath: string): AgentConfig {
+	try {
+		const dir = ensureProjectAgentsDir(cwd);
+		const content = fs.readFileSync(templatePath, "utf-8");
+		const { frontmatter, body } = parseFrontmatter<Record<string, any>>(content);
+		
+		// Update the name in frontmatter
+		frontmatter.name = name;
+		
+		const serialized = serializeAgentFile(frontmatter, body);
+		const destPath = path.join(dir, `${name}.md`);
+		fs.writeFileSync(destPath, serialized, "utf-8");
+		
+		// Parse the new file to create AgentConfig
+		const tools = frontmatter.tools
+			?.split(",")
+			.map((t: string) => t.trim())
+			.filter(Boolean);
+		
+		return {
+			name: frontmatter.name,
+			description: frontmatter.description || "",
+			tools: tools && tools.length > 0 ? tools : undefined,
+			model: frontmatter.model,
+			thinking: frontmatter.thinking,
+			systemPrompt: body,
+			source: "project",
+			filePath: destPath,
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Failed to create agent from template: ${message}`);
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Agent discovery
@@ -1118,6 +1292,959 @@ export default function (pi: ExtensionAPI) {
 			}
 			const listing = agents.map((a) => `${a.name} (${a.source}): ${a.description}`).join("\n");
 			ctx.ui.notify(listing, "info");
+		},
+	});
+
+	// ---------------------------------------------------------------------------
+	// Agent TUI components
+	// ---------------------------------------------------------------------------
+
+	class AgentSelectorComponent extends Container implements Focusable {
+		private searchInput: Input;
+		private listContainer: Container;
+		private allAgents: AgentConfig[];
+		private filteredAgents: AgentConfig[];
+		private selectedIndex = 0;
+		private onSelectCallback: (agent: AgentConfig) => void;
+		private onCancelCallback: () => void;
+		private tui: TUI;
+		private theme: ExtensionContext["theme"];
+		private headerText: Text;
+		private hintText: Text;
+
+		private _focused = false;
+		get focused(): boolean {
+			return this._focused;
+		}
+		set focused(value: boolean) {
+			this._focused = value;
+			this.searchInput.focused = value;
+		}
+
+		constructor(
+			tui: TUI,
+			theme: ExtensionContext["theme"],
+			agents: AgentConfig[],
+			onSelect: (agent: AgentConfig) => void,
+			onCancel: () => void,
+			private onQuickAction?: (agent: AgentConfig, action: "n" | "m" | "t" | "k" | "d" | "e") => void,
+		) {
+			super();
+			this.tui = tui;
+			this.theme = theme;
+			this.allAgents = agents;
+			this.filteredAgents = agents;
+			this.onSelectCallback = onSelect;
+			this.onCancelCallback = onCancel;
+
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			this.addChild(new Spacer(1));
+
+			this.headerText = new Text("", 1, 0);
+			this.addChild(this.headerText);
+			this.addChild(new Spacer(1));
+
+			this.searchInput = new Input();
+			this.searchInput.onSubmit = () => {
+				const selected = this.filteredAgents[this.selectedIndex];
+				if (selected) this.onSelectCallback(selected);
+			};
+			this.addChild(this.searchInput);
+
+			this.addChild(new Spacer(1));
+			this.listContainer = new Container();
+			this.addChild(this.listContainer);
+
+			this.addChild(new Spacer(1));
+			this.hintText = new Text("", 1, 0);
+			this.addChild(this.hintText);
+			this.addChild(new Spacer(1));
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+			this.updateHeader();
+			this.updateHints();
+			this.applyFilter(this.searchInput.getValue());
+		}
+
+		setAgents(agents: AgentConfig[]): void {
+			this.allAgents = agents;
+			this.updateHeader();
+			this.applyFilter(this.searchInput.getValue());
+			this.tui.requestRender();
+		}
+
+		getSelectedAgent(): AgentConfig | null {
+			return this.filteredAgents[this.selectedIndex] ?? null;
+		}
+
+		private updateHeader(): void {
+			const projectCount = this.allAgents.filter((a) => a.source === "project").length;
+			const title = `Agents (${projectCount} project, ${this.allAgents.length} total)`;
+			this.headerText.setText(this.theme.fg("accent", this.theme.bold(title)));
+		}
+
+		private updateHints(): void {
+			this.hintText.setText(
+				this.theme.fg(
+					"dim",
+					"Type to search \u00b7 \u2191\u2193 select \u00b7 Enter actions \u00b7 n new \u00b7 Esc close",
+				),
+			);
+		}
+
+		private applyFilter(query: string): void {
+			const trimmed = query.trim();
+			if (!trimmed) {
+				this.filteredAgents = this.allAgents;
+			} else {
+				const tokens = trimmed.split(/\s+/).filter(Boolean);
+				if (tokens.length === 0) {
+					this.filteredAgents = this.allAgents;
+				} else {
+					const matches: Array<{ agent: AgentConfig; score: number }> = [];
+					for (const agent of this.allAgents) {
+						const searchText = `${agent.name} ${agent.description} ${agent.source}`;
+						let totalScore = 0;
+						let matched = true;
+						for (const token of tokens) {
+							const result = fuzzyMatch(token, searchText);
+							if (!result.matches) {
+								matched = false;
+								break;
+							}
+							totalScore += result.score;
+						}
+						if (matched) {
+							matches.push({ agent, score: totalScore });
+						}
+					}
+					this.filteredAgents = matches.sort((a, b) => a.score - b.score).map((m) => m.agent);
+				}
+			}
+			this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredAgents.length - 1));
+			this.updateList();
+		}
+
+		private updateList(): void {
+			this.listContainer.clear();
+
+			if (this.filteredAgents.length === 0) {
+				this.listContainer.addChild(new Text(this.theme.fg("muted", "  No matching agents"), 0, 0));
+				return;
+			}
+
+			const maxVisible = 10;
+			const startIndex = Math.max(
+				0,
+				Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredAgents.length - maxVisible),
+			);
+			const endIndex = Math.min(startIndex + maxVisible, this.filteredAgents.length);
+
+			for (let i = startIndex; i < endIndex; i++) {
+				const agent = this.filteredAgents[i];
+				if (!agent) continue;
+				const isSelected = i === this.selectedIndex;
+				const prefix = isSelected ? this.theme.fg("accent", "\u25b6 ") : "  ";
+
+				const sourceLabels: Record<AgentConfig["source"], string> = {
+					project: "[prj]",
+					"package": "[pkg]",
+					user: "[usr]",
+					"pi-project": "[pi]",
+				};
+				const sourceLabel = sourceLabels[agent.source];
+				const sourceColor = agent.source === "project" ? "accent" : "muted";
+
+				const nameColor = isSelected ? "accent" : "text";
+				const modelText = agent.model ? this.theme.fg("dim", ` [${agent.model}]`) : "";
+				const toolsText = agent.tools ? this.theme.fg("dim", ` {${agent.tools.length} tools}`) : "";
+				const thinkingText = agent.thinking ? this.theme.fg("dim", " ~" + agent.thinking) : "";
+
+				const line =
+					prefix +
+					this.theme.fg(sourceColor, sourceLabel) +
+					" " +
+					this.theme.fg(nameColor, agent.name) +
+					modelText +
+					toolsText +
+					thinkingText;
+
+				this.listContainer.addChild(new Text(line, 0, 0));
+			}
+
+			if (startIndex > 0 || endIndex < this.filteredAgents.length) {
+				const scrollInfo = this.theme.fg(
+					"dim",
+					`  (${this.selectedIndex + 1}/${this.filteredAgents.length})`,
+				);
+				this.listContainer.addChild(new Text(scrollInfo, 0, 0));
+			}
+		}
+
+		handleInput(keyData: string): void {
+			if (matchesKey(keyData, Key.up)) {
+				if (this.filteredAgents.length === 0) return;
+				this.selectedIndex = this.selectedIndex === 0 ? this.filteredAgents.length - 1 : this.selectedIndex - 1;
+				this.updateList();
+				this.tui.requestRender();
+				return;
+			}
+			if (matchesKey(keyData, Key.down)) {
+				if (this.filteredAgents.length === 0) return;
+				this.selectedIndex = this.selectedIndex === this.filteredAgents.length - 1 ? 0 : this.selectedIndex + 1;
+				this.updateList();
+				this.tui.requestRender();
+				return;
+			}
+			if (matchesKey(keyData, Key.enter)) {
+				const selected = this.filteredAgents[this.selectedIndex];
+				if (selected) this.onSelectCallback(selected);
+				return;
+			}
+			if (matchesKey(keyData, Key.escape) || matchesKey(keyData, Key.ctrl("c"))) {
+				this.onCancelCallback();
+				return;
+			}
+
+			// Quick action shortcuts - only 'n' for new (when search is empty)
+			if (keyData === "n" && !this.searchInput.getValue()) {
+				if (this.onQuickAction) this.onQuickAction(this.filteredAgents[this.selectedIndex], "n");
+				return;
+			}
+
+			this.searchInput.handleInput(keyData);
+			this.applyFilter(this.searchInput.getValue());
+			this.tui.requestRender();
+		}
+
+		override invalidate(): void {
+			super.invalidate();
+			this.updateHeader();
+			this.updateHints();
+			this.updateList();
+		}
+	}
+
+	class AgentActionMenuComponent extends Container {
+		private selectList: SelectList;
+		private onSelectCallback: (action: string) => void;
+		private onCancelCallback: () => void;
+
+		constructor(
+			theme: ExtensionContext["theme"],
+			agent: AgentConfig,
+			onSelect: (action: string) => void,
+			onCancel: () => void,
+		) {
+			super();
+			this.onSelectCallback = onSelect;
+			this.onCancelCallback = onCancel;
+
+			const options: SelectItem[] = [
+				...(isTmuxAvailable() ? [{ value: "edit", label: "edit", description: "Edit in vim (tmux)" }] : []),
+				{ value: "model", label: "model", description: "Change model" },
+				{ value: "tools", label: "tools", description: "Configure tools" },
+				{ value: "thinking", label: "thinking", description: "Set thinking level" },
+				{ value: "copyPath", label: "copy path", description: "Copy file path to clipboard" },
+				...(agent.source === "project" ? [{ value: "delete", label: "delete", description: "Delete project agent" }] : []),
+			];
+
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			this.addChild(
+				new Text(
+					theme.fg("accent", theme.bold(`Actions for ${agent.name}`)),
+				),
+			);
+
+			this.selectList = new SelectList(options, options.length, {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			});
+
+			this.selectList.onSelect = (item) => this.onSelectCallback(item.value);
+			this.selectList.onCancel = () => this.onCancelCallback();
+
+			this.addChild(this.selectList);
+			this.addChild(new Text(theme.fg("dim", "Enter to confirm \u00b7 Esc back")));
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		}
+
+		handleInput(keyData: string): void {
+			this.selectList.handleInput(keyData);
+		}
+
+		override invalidate(): void {
+			super.invalidate();
+		}
+	}
+
+	class ModelPickerComponent extends Container {
+		private selectList: SelectList;
+
+		constructor(
+			theme: ExtensionContext["theme"],
+			models: Model[],
+			currentModel: string | undefined,
+			onSelect: (modelId: string) => void,
+			onCancel: () => void,
+		) {
+			super();
+
+			// Group models by provider
+			const grouped = new Map<string, Model[]>();
+			for (const model of models) {
+				const provider = model.provider || "other";
+				if (!grouped.has(provider)) grouped.set(provider, []);
+				grouped.get(provider)!.push(model);
+			}
+
+			// Build flat list with provider headers (non-selectable separators)
+			const items: SelectItem[] = [];
+			for (const [provider, providerModels] of grouped) {
+				// Add provider header as separator
+				items.push({ value: `__header_${provider}`, label: `--- ${provider} ---`, description: "" });
+				// Add models
+				for (const model of providerModels) {
+					const isCurrentModel = model.id === currentModel;
+					const label = (isCurrentModel ? "\u2713 " : "") + model.name;
+					items.push({ value: model.id, label, description: model.id });
+				}
+			}
+
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			this.addChild(new Text(theme.fg("accent", theme.bold("Select model"))));
+
+			this.selectList = new SelectList(items, Math.min(15, items.length), {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			});
+
+			this.selectList.onSelect = (item) => {
+				// Skip header items
+				if (item.value.startsWith("__header_")) return;
+				onSelect(item.value);
+			};
+			this.selectList.onCancel = onCancel;
+
+			this.addChild(this.selectList);
+			this.addChild(new Text(theme.fg("dim", "Enter to confirm \u00b7 Esc back")));
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		}
+
+		handleInput(keyData: string): void {
+			this.selectList.handleInput(keyData);
+		}
+
+		override invalidate(): void {
+			super.invalidate();
+		}
+	}
+
+	class ToolsPickerComponent extends Container {
+		private knownTools = ["read", "write", "edit", "bash", "grep", "find", "ls"];
+		private selectedTools: Set<string>;
+		private selectedIndex = 0;
+		private tui: TUI;
+		private theme: ExtensionContext["theme"];
+		private listContainer: Container;
+		private onConfirmCallback: (tools: string[]) => void;
+		private onCancelCallback: () => void;
+
+		constructor(
+			tui: TUI,
+			theme: ExtensionContext["theme"],
+			currentTools: string[] | undefined,
+			onConfirm: (tools: string[]) => void,
+			onCancel: () => void,
+		) {
+			super();
+			this.tui = tui;
+			this.theme = theme;
+			this.selectedTools = new Set(currentTools ?? []);
+			this.onConfirmCallback = onConfirm;
+			this.onCancelCallback = onCancel;
+
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			this.addChild(new Text(theme.fg("accent", theme.bold("Configure tools (Space to toggle)"))));
+			this.addChild(new Spacer(1));
+
+			this.listContainer = new Container();
+			this.addChild(this.listContainer);
+
+			this.addChild(new Spacer(1));
+			this.addChild(new Text(theme.fg("dim", "Space toggle \u00b7 Enter confirm \u00b7 Esc cancel")));
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+			this.updateList();
+		}
+
+		private updateList(): void {
+			this.listContainer.clear();
+
+			for (let i = 0; i < this.knownTools.length; i++) {
+				const tool = this.knownTools[i];
+				const isSelected = i === this.selectedIndex;
+				const isChecked = this.selectedTools.has(tool);
+				const prefix = isSelected ? this.theme.fg("accent", "\u25b6 ") : "  ";
+				const checkbox = isChecked ? "[x]" : "[ ]";
+				const checkboxColor = isChecked ? "accent" : "muted";
+				const textColor = isSelected ? "accent" : "text";
+
+				const line = prefix + this.theme.fg(checkboxColor, checkbox) + " " + this.theme.fg(textColor, tool);
+				this.listContainer.addChild(new Text(line, 0, 0));
+			}
+		}
+
+		handleInput(keyData: string): void {
+			if (matchesKey(keyData, Key.up)) {
+				this.selectedIndex = this.selectedIndex === 0 ? this.knownTools.length - 1 : this.selectedIndex - 1;
+				this.updateList();
+				this.tui.requestRender();
+				return;
+			}
+			if (matchesKey(keyData, Key.down)) {
+				this.selectedIndex = this.selectedIndex === this.knownTools.length - 1 ? 0 : this.selectedIndex + 1;
+				this.updateList();
+				this.tui.requestRender();
+				return;
+			}
+			if (keyData === " ") {
+				const tool = this.knownTools[this.selectedIndex];
+				if (this.selectedTools.has(tool)) {
+					this.selectedTools.delete(tool);
+				} else {
+					this.selectedTools.add(tool);
+				}
+				this.updateList();
+				this.tui.requestRender();
+				return;
+			}
+			if (matchesKey(keyData, Key.enter)) {
+				this.onConfirmCallback(Array.from(this.selectedTools));
+				return;
+			}
+			if (matchesKey(keyData, Key.escape)) {
+				this.onCancelCallback();
+				return;
+			}
+		}
+
+		override invalidate(): void {
+			super.invalidate();
+			this.updateList();
+		}
+	}
+
+	class ThinkingPickerComponent extends Container {
+		private selectList: SelectList;
+
+		constructor(
+			theme: ExtensionContext["theme"],
+			currentThinking: string | undefined,
+			onSelect: (thinking: string) => void,
+			onCancel: () => void,
+		) {
+			super();
+
+			const options: SelectItem[] = [
+				{ value: "", label: (!currentThinking ? "\u2713 " : "") + "off", description: "No extended thinking" },
+				{ value: "low", label: (currentThinking === "low" ? "\u2713 " : "") + "low", description: "Minimal thinking budget" },
+				{ value: "medium", label: (currentThinking === "medium" ? "\u2713 " : "") + "medium", description: "Moderate thinking budget" },
+				{ value: "high", label: (currentThinking === "high" ? "\u2713 " : "") + "high", description: "Extended thinking budget" },
+			];
+
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			this.addChild(new Text(theme.fg("accent", theme.bold("Select thinking level"))));
+
+			this.selectList = new SelectList(options, options.length, {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			});
+
+			this.selectList.onSelect = (item) => onSelect(item.value);
+			this.selectList.onCancel = onCancel;
+
+			this.addChild(this.selectList);
+			this.addChild(new Text(theme.fg("dim", "Enter to confirm \u00b7 Esc back")));
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		}
+
+		handleInput(keyData: string): void {
+			this.selectList.handleInput(keyData);
+		}
+
+		override invalidate(): void {
+			super.invalidate();
+		}
+	}
+
+	class TemplatePickerComponent extends Container {
+		private selectList: SelectList;
+
+		constructor(
+			theme: ExtensionContext["theme"],
+			templates: AgentTemplate[],
+			onSelect: (templatePath: string) => void,
+			onCancel: () => void,
+		) {
+			super();
+
+			const items: SelectItem[] = templates.map((t) => ({
+				value: t.path,
+				label: t.name,
+				description: t.description,
+			}));
+
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			this.addChild(new Text(theme.fg("accent", theme.bold("Select template"))));
+
+			this.selectList = new SelectList(items, Math.min(10, items.length), {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			});
+
+			this.selectList.onSelect = (item) => onSelect(item.value);
+			this.selectList.onCancel = onCancel;
+
+			this.addChild(this.selectList);
+			this.addChild(new Text(theme.fg("dim", "Enter to confirm \u00b7 Esc back")));
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		}
+
+		handleInput(keyData: string): void {
+			this.selectList.handleInput(keyData);
+		}
+
+		override invalidate(): void {
+			super.invalidate();
+		}
+	}
+
+	class DeleteConfirmComponent extends Container {
+		private selectList: SelectList;
+
+		constructor(
+			theme: ExtensionContext["theme"],
+			agentName: string,
+			onConfirm: () => void,
+			onCancel: () => void,
+		) {
+			super();
+
+			const options: SelectItem[] = [
+				{ value: "cancel", label: "Cancel", description: "Keep the agent" },
+				{ value: "delete", label: "Delete", description: "Permanently delete" },
+			];
+
+			this.addChild(new DynamicBorder((s: string) => theme.fg("error", s)));
+			this.addChild(new Text(theme.fg("error", theme.bold(`Delete ${agentName}?`))));
+			this.addChild(new Spacer(1));
+			this.addChild(new Text(theme.fg("warning", "This will permanently delete the project agent file.")));
+			this.addChild(new Spacer(1));
+
+			this.selectList = new SelectList(options, options.length, {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			});
+
+			this.selectList.onSelect = (item) => {
+				if (item.value === "delete") onConfirm();
+				else onCancel();
+			};
+			this.selectList.onCancel = onCancel;
+
+			this.addChild(this.selectList);
+			this.addChild(new Text(theme.fg("dim", "Enter to confirm · Esc cancel")));
+			this.addChild(new DynamicBorder((s: string) => theme.fg("error", s)));
+		}
+
+		handleInput(keyData: string): void {
+			this.selectList.handleInput(keyData);
+		}
+
+		override invalidate(): void {
+			super.invalidate();
+		}
+	}
+
+	class NameInputComponent extends Container {
+		private input: Input;
+		private tui: TUI;
+		private onCancelCallback: () => void;
+		private ctx: ExtensionContext;
+
+		constructor(
+			tui: TUI,
+			theme: ExtensionContext["theme"],
+			defaultName: string,
+			onConfirm: (name: string) => void,
+			onCancel: () => void,
+			ctx: ExtensionContext,
+		) {
+			super();
+			this.tui = tui;
+			this.ctx = ctx;
+			this.onCancelCallback = onCancel;
+
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			this.addChild(new Text(theme.fg("accent", theme.bold("Enter agent name"))));
+			this.addChild(new Spacer(1));
+
+			this.input = new Input();
+			this.input.setValue(defaultName);
+			this.input.onSubmit = () => {
+				const name = this.input.getValue().trim();
+				if (!name) return;
+				
+				// Validate agent name: only alphanumeric, hyphens, underscores
+				const normalized = name.toLowerCase();
+				if (!/^[a-z0-9_-]+$/.test(normalized)) {
+					this.ctx.ui.notify(
+						"Invalid agent name. Use only letters, numbers, hyphens, and underscores.",
+						"error"
+					);
+					return;
+				}
+				
+				onConfirm(normalized);
+			};
+			this.addChild(this.input);
+
+			this.addChild(new Spacer(1));
+			this.addChild(new Text(theme.fg("dim", "Enter to confirm \u00b7 Esc cancel")));
+			this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		}
+
+		get focused(): boolean {
+			return this.input.focused;
+		}
+
+		set focused(value: boolean) {
+			this.input.focused = value;
+		}
+
+		handleInput(keyData: string): void {
+			if (matchesKey(keyData, Key.escape)) {
+				this.onCancelCallback();
+				return;
+			}
+			this.input.handleInput(keyData);
+		}
+
+		override invalidate(): void {
+			super.invalidate();
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// /agent command — manage per-project agent configurations
+	// ---------------------------------------------------------------------------
+
+	pi.registerCommand("agent", {
+		description: "Manage per-project agent configurations",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("/agent requires interactive mode", "error");
+				return;
+			}
+
+			const cwd = ctx.cwd;
+			let rootTui: TUI | null = null;
+
+			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+				rootTui = tui;
+				let selector: AgentSelectorComponent | null = null;
+				let actionMenu: AgentActionMenuComponent | null = null;
+				let activeComponent:
+					| {
+							render: (width: number) => string[];
+							invalidate: () => void;
+							handleInput?: (data: string) => void;
+							focused?: boolean;
+					  }
+					| null = null;
+				let wrapperFocused = false;
+
+				const setActiveComponent = (
+					component:
+						| {
+								render: (width: number) => string[];
+								invalidate: () => void;
+								handleInput?: (data: string) => void;
+								focused?: boolean;
+						  }
+						| null,
+				) => {
+					if (activeComponent && "focused" in activeComponent) {
+						activeComponent.focused = false;
+					}
+					activeComponent = component;
+					if (activeComponent && "focused" in activeComponent) {
+						activeComponent.focused = wrapperFocused;
+					}
+					tui.requestRender();
+				};
+
+				const refreshAgents = () => {
+					const { agents } = discoverAgents(cwd);
+					selector?.setAgents(agents);
+				};
+
+				const copyAgentPathToClipboard = (agent: AgentConfig) => {
+					const absolutePath = path.resolve(agent.filePath);
+					try {
+						copyToClipboard(absolutePath);
+						ctx.ui.notify(`Copied ${absolutePath} to clipboard`, "info");
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						ctx.ui.notify(message, "error");
+					}
+				};
+
+				const ensureProjectAgent = (agent: AgentConfig): AgentConfig => {
+					if (agent.source === "project") return agent;
+					const overridden = createAgentOverride(cwd, agent);
+					ctx.ui.notify(`Created project override for ${agent.name}`, "info");
+					refreshAgents();
+					return overridden;
+				};
+
+				const handleAction = async (agent: AgentConfig, action: string) => {
+					if (action === "edit") {
+						const targetAgent = ensureProjectAgent(agent);
+						const filePath = path.resolve(targetAgent.filePath);
+						openEditorPane(filePath);
+						setActiveComponent(selector);
+						return;
+					}
+
+					if (action === "model") {
+						const targetAgent = ensureProjectAgent(agent);
+						const models = ctx.modelRegistry.getAvailable();
+						const modelPicker = new ModelPickerComponent(
+							theme,
+							models,
+							targetAgent.model,
+							(modelId) => {
+								updateAgentFrontmatter(targetAgent, { model: modelId });
+								ctx.ui.notify(`Updated model for ${targetAgent.name}`, "info");
+								refreshAgents();
+								setActiveComponent(selector);
+							},
+							() => setActiveComponent(actionMenu),
+						);
+						setActiveComponent(modelPicker);
+						return;
+					}
+
+					if (action === "tools") {
+						const targetAgent = ensureProjectAgent(agent);
+						const toolsPicker = new ToolsPickerComponent(
+							tui,
+							theme,
+							targetAgent.tools,
+							(tools) => {
+								updateAgentFrontmatter(targetAgent, { tools });
+								ctx.ui.notify(`Updated tools for ${targetAgent.name}`, "info");
+								refreshAgents();
+								setActiveComponent(selector);
+							},
+							() => setActiveComponent(actionMenu),
+						);
+						setActiveComponent(toolsPicker);
+						return;
+					}
+
+					if (action === "thinking") {
+						const targetAgent = ensureProjectAgent(agent);
+						const thinkingPicker = new ThinkingPickerComponent(
+							theme,
+							targetAgent.thinking,
+							(thinking) => {
+								updateAgentFrontmatter(targetAgent, { thinking });
+								ctx.ui.notify(`Updated thinking for ${targetAgent.name}`, "info");
+								refreshAgents();
+								setActiveComponent(selector);
+							},
+							() => setActiveComponent(actionMenu),
+						);
+						setActiveComponent(thinkingPicker);
+						return;
+					}
+
+					if (action === "copyPath") {
+						copyAgentPathToClipboard(agent);
+						setActiveComponent(selector);
+						return;
+					}
+
+					if (action === "delete") {
+						if (agent.source !== "project") {
+							ctx.ui.notify("Can only delete project agents", "warning");
+							setActiveComponent(selector);
+							return;
+						}
+						
+						// Show confirmation component
+						const confirmComponent = new DeleteConfirmComponent(
+							theme,
+							agent.name,
+							() => {
+								try {
+									deleteProjectAgent(cwd, agent.name);
+									ctx.ui.notify(`Deleted ${agent.name}`, "info");
+									refreshAgents();
+									setActiveComponent(selector);
+								} catch (error) {
+									const message = error instanceof Error ? error.message : String(error);
+									ctx.ui.notify(message, "error");
+									setActiveComponent(selector);
+								}
+							},
+							() => setActiveComponent(actionMenu),
+						);
+						setActiveComponent(confirmComponent);
+						return;
+					}
+
+					setActiveComponent(selector);
+				};
+
+				const handleQuickAction = (agent: AgentConfig | null, action: "n" | "m" | "t" | "k" | "d" | "e") => {
+					if (action === "n") {
+						// New agent flow: template picker -> name input -> create -> (optionally edit)
+						const templates = getAvailableTemplates();
+						if (templates.length === 0) {
+							ctx.ui.notify("No templates found", "warning");
+							return;
+						}
+
+						const templatePicker = new TemplatePickerComponent(
+							theme,
+							templates,
+							(templatePath) => {
+								const nameInput = new NameInputComponent(
+									tui,
+									theme,
+									"my-agent",
+									(name) => {
+										try {
+											const newAgent = createAgentFromTemplate(cwd, name, templatePath);
+											ctx.ui.notify(`Created ${name}`, "info");
+											refreshAgents();
+
+											if (isTmuxAvailable()) {
+												const filePath = path.resolve(newAgent.filePath);
+												openEditorPane(filePath);
+											}
+
+											setActiveComponent(selector);
+										} catch (error) {
+											const message = error instanceof Error ? error.message : String(error);
+											ctx.ui.notify(message, "error");
+											setActiveComponent(selector);
+										}
+									},
+									() => setActiveComponent(selector),
+									ctx,
+								);
+								setActiveComponent(nameInput);
+							},
+							() => setActiveComponent(selector),
+						);
+						setActiveComponent(templatePicker);
+						return;
+					}
+
+					if (!agent) return;
+
+					// Direct shortcuts for m, t, k
+					if (action === "m") {
+						void handleAction(agent, "model");
+						return;
+					}
+					if (action === "t") {
+						void handleAction(agent, "tools");
+						return;
+					}
+					if (action === "k") {
+						void handleAction(agent, "thinking");
+						return;
+					}
+					if (action === "d") {
+						void handleAction(agent, "delete");
+						return;
+					}
+					if (action === "e") {
+						void handleAction(agent, "edit");
+						return;
+					}
+				};
+
+				const showActionMenu = (agent: AgentConfig) => {
+					actionMenu = new AgentActionMenuComponent(
+						theme,
+						agent,
+						(action) => {
+							void handleAction(agent, action);
+						},
+						() => setActiveComponent(selector),
+					);
+					setActiveComponent(actionMenu);
+				};
+
+				const { agents } = discoverAgents(cwd);
+				selector = new AgentSelectorComponent(
+					tui,
+					theme,
+					agents,
+					(agent) => {
+						showActionMenu(agent);
+					},
+					() => done(),
+					handleQuickAction,
+				);
+
+				setActiveComponent(selector);
+
+				const rootComponent = {
+					get focused() {
+						return wrapperFocused;
+					},
+					set focused(value: boolean) {
+						wrapperFocused = value;
+						if (activeComponent && "focused" in activeComponent) {
+							activeComponent.focused = value;
+						}
+					},
+					render(width: number) {
+						return activeComponent ? activeComponent.render(width) : [];
+					},
+					invalidate() {
+						activeComponent?.invalidate();
+					},
+					handleInput(data: string) {
+						activeComponent?.handleInput?.(data);
+					},
+				};
+
+				return rootComponent;
+			});
 		},
 	});
 }
