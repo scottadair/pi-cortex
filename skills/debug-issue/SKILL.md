@@ -21,23 +21,18 @@ Use the `team` tool to run the **architect** agent for analysis:
 team run architect "Analyze this bug: <description>. Find the relevant code, trace the execution path, and identify likely root causes."
 ```
 
-## 3. Create a Todo
-Save findings as a todo with an investigation plan:
+## 3. Create a Todo with Fix Plan
+Save the analysis as a todo with a full plan document:
 
 ```
-todo create title="Fix: <bug description>" description="<root cause analysis>" steps=["Investigate <area>", "Fix <root cause>", "Add test coverage", "Verify fix"]
+todo create title="Fix: <bug description>" description="<root cause summary>" plan="<full plan with Context, Root Cause, Changes (specific files/lines/code), Verification>"
 ```
 
 ## 4. Implement Fix
-Run the appropriate developer agent:
+Run the appropriate developer agent, referencing the plan:
 
 ```
-team run dev-backend "Fix the bug: <specific fix based on analysis>. The root cause is <cause> in <file>."
-```
-
-Mark progress:
-```
-todo complete-step id="<id>" step_number=<n>
+team run dev-backend "Fix the bug per the plan: <specific change section>"
 ```
 
 ## 5. Verify

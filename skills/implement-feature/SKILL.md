@@ -2,8 +2,9 @@
 name: implement-feature
 description: |
   End-to-end feature implementation workflow. Creates a todo with description
-  and plan, implements in stages with the appropriate developer, and runs QA
-  review. Use when asked to implement a new feature or make substantial changes.
+  and a full implementation plan, implements with the appropriate developers,
+  and runs QA review. Use when asked to implement a new feature or make
+  substantial changes.
 ---
 
 # Implement Feature Workflow
@@ -18,23 +19,18 @@ team run architect "Analyze the codebase and create an implementation plan for: 
 ```
 
 ## 2. Create a Todo with Plan
-Use the `todo` tool to create a task with the architect's plan saved as steps:
+Use the `todo` tool to create a task. Save the architect's full output as the plan — it should include Context, Changes (with numbered sections, file paths, code snippets), Files to modify, and Verification:
 
 ```
-todo create title="<feature name>" description="<goal and context>" steps=["step 1", "step 2", ...] priority="high"
+todo create title="<feature name>" description="<one-line summary>" plan="<full plan markdown from architect>"
 ```
 
 ## 3. Implement
-Run the appropriate developer agent for each step:
+Run the appropriate developer agent for each change section in the plan:
 
 ```
-team run dev-backend "<specific task with context from the plan>"
-team run dev-frontend "<specific task with context from the plan>"
-```
-
-Mark steps done as you go:
-```
-todo complete-step id="<id>" step_number=<n>
+team run dev-backend "<specific task referencing the plan's change section>"
+team run dev-frontend "<specific task referencing the plan's change section>"
 ```
 
 ## 4. QA Review
@@ -45,7 +41,7 @@ team run qa "Review the implementation of <feature>. Run tests and check for iss
 ```
 
 ## 5. Finalize
-Update the todo status when all steps are done and QA passes:
+Update the todo status when QA passes:
 ```
 todo update id="<id>" status="done"
 ```

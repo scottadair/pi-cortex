@@ -44,8 +44,9 @@ Registers a `team` tool and `/team` command. Spawns isolated `pi` subprocesses p
 
 ### Todos (`extensions/todos/`)
 Registers a `todo` tool, `/tasks` command, `/answer` command, and `Ctrl+.` shortcut. Persists as markdown files in `.cortex/todos/`.
-- Each todo has three sections: **title** (frontmatter), **description** (markdown), **plan** (ordered steps with `[ ]`/`[x]` checkboxes)
-- **Actions**: `create`, `update`, `list`, `get`, `set-description`, `set-plan`, `add-step`, `complete-step`, `delete`, `refine`
+- Each todo has three sections: **title** (frontmatter), **description** (markdown), **plan** (full implementation document in markdown)
+- Plans are rich documents with Context, Changes (numbered sections with file paths, line numbers, code snippets), Files to modify, and Verification — not just checklists
+- **Actions**: `create`, `update`, `list`, `get`, `set-description`, `set-plan`, `delete`, `refine`
 - **Refine flow**: agent asks clarifying questions → user answers via `/answer` Q&A TUI → agent updates description and plan
 - `/tasks` TUI: arrow keys to select, `r` to refine, `w`/Enter to work on a todo
 - `/answer` (or `Ctrl+.`): extracts questions from last assistant message into interactive Q&A

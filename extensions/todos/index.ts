@@ -44,16 +44,10 @@ interface TodoMeta {
 	updated_at: string;
 }
 
-interface PlanStep {
-	number: number;
-	text: string;
-	completed: boolean;
-}
-
 interface TodoFile {
 	meta: TodoMeta;
 	description: string;
-	plan: PlanStep[];
+	plan: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,21 +73,14 @@ function parseTodoFile(content: string): TodoFile | null {
 
 		// Parse structured sections from body
 		const descMatch = body.match(/## Description\n([\s\S]*?)(?=\n## |\n*$)/);
-		const description = descMatch ? descMatch[1].trim() : body.trim();
+		const description = descMatch ? descMatch[1].trim() : "";
 
 		const planMatch = body.match(/## Plan\n([\s\S]*?)(?=\n## |\n*$)/);
-		const plan: PlanStep[] = [];
-		if (planMatch) {
-			for (const line of planMatch[1].trim().split("\n")) {
-				const stepMatch = line.match(/^(\d+)\.\s+\[(x| )\]\s+(.+)$/);
-				if (stepMatch) {
-					plan.push({
-						number: parseInt(stepMatch[1], 10),
-						text: stepMatch[3].trim(),
-						completed: stepMatch[2] === "x",
-					});
-				}
-			}
+		const plan = planMatch ? planMatch[1].trim() : "";
+
+		// If no sections found, treat whole body as description (backwards compat)
+		if (!descMatch && !planMatch && body.trim()) {
+			return { meta, description: body.trim(), plan: "" };
 		}
 
 		return { meta, description, plan };
@@ -110,12 +97,8 @@ function serializeTodoFile(todo: TodoFile): string {
 		body += `## Description\n${todo.description}\n\n`;
 	}
 
-	if (todo.plan.length > 0) {
-		body += `## Plan\n`;
-		for (const step of todo.plan) {
-			body += `${step.number}. [${step.completed ? "x" : " "}] ${step.text}\n`;
-		}
-		body += "\n";
+	if (todo.plan) {
+		body += `## Plan\n${todo.plan}\n\n`;
 	}
 
 	return `---\n${frontmatter}\n---\n${body}`;
@@ -541,7 +524,7 @@ class TodoListComponent {
 					const statusColor = t.meta.status === "blocked" ? "error" : "muted";
 					const priority = t.meta.priority ? PRIORITY_LABELS[t.meta.priority] || "" : "";
 					const assignee = t.meta.assignee ? th.fg("dim", ` @${t.meta.assignee}`) : "";
-					const planInfo = t.plan.length > 0 ? th.fg("dim", ` [${t.plan.filter((s) => s.completed).length}/${t.plan.length}]`) : "";
+					const planInfo = t.plan ? th.fg("dim", " [plan]") : "";
 					const titleText = th.fg("text", t.meta.title);
 					const cursor = flatIndex === this.selectedIndex ? th.fg("accent", "\u25b6 ") : "  ";
 					const highlight = flatIndex === this.selectedIndex ? th.fg("accent", `#${t.meta.id}`) : th.fg("muted", `#${t.meta.id}`);
@@ -584,9 +567,9 @@ class TodoListComponent {
 function buildRefinePrompt(id: string, title: string): string {
 	return (
 		`Let's refine task #${id} "${title}": ` +
-		"Ask me for the missing details needed to build a solid description and implementation plan for this todo. " +
+		"Ask me for the missing details needed to build a solid description and a full implementation plan. " +
 		"Do not rewrite the todo yet and do not make assumptions. " +
-		"Ask clear, concrete questions and wait for my answers before drafting any structured description or plan steps.\n\n"
+		"Ask clear, concrete questions and wait for my answers before writing the plan document.\n\n"
 	);
 }
 
@@ -595,12 +578,13 @@ function buildRefinePrompt(id: string, title: string): string {
 // ---------------------------------------------------------------------------
 
 const TodoParams = Type.Object({
-	action: StringEnum(["create", "update", "list", "get", "set-description", "set-plan", "add-step", "complete-step", "delete", "refine"] as const, {
+	action: StringEnum(["create", "update", "list", "get", "set-description", "set-plan", "delete", "refine"] as const, {
 		description: "Action to perform",
 	}),
 	id: Type.Optional(Type.String({ description: "Todo ID (required for most actions except create, list)" })),
 	title: Type.Optional(Type.String({ description: "Todo title (for create, update)" })),
 	description: Type.Optional(Type.String({ description: "Description text (for create, set-description)" })),
+	plan: Type.Optional(Type.String({ description: "Full implementation plan as markdown (for create, set-plan). Include Context, Changes (with file paths and code), Files to modify, and Verification sections." })),
 	status: Type.Optional(StringEnum(["todo", "in-progress", "done", "blocked"] as const, {
 		description: "Status (for create, update)",
 	})),
@@ -609,9 +593,6 @@ const TodoParams = Type.Object({
 		description: "Priority level (for create, update)",
 	})),
 	tags: Type.Optional(Type.Array(Type.String(), { description: "Tags (for create, update)" })),
-	steps: Type.Optional(Type.Array(Type.String(), { description: "Plan step descriptions (for create, set-plan)" })),
-	step: Type.Optional(Type.String({ description: "Single step text (for add-step)" })),
-	step_number: Type.Optional(Type.Number({ description: "Step number (for complete-step, add-step position)" })),
 	filter_status: Type.Optional(Type.String({ description: "Filter by status (for list)" })),
 	filter_assignee: Type.Optional(Type.String({ description: "Filter by assignee (for list)" })),
 });
@@ -621,14 +602,14 @@ export default function (pi: ExtensionAPI) {
 		name: "todo",
 		label: "Todo",
 		description: [
-			"Manage project tasks stored in .cortex/todos/. Each todo has a title, description, and plan (ordered steps with completion tracking).",
-			"Actions: create (title, description?, steps?, assignee?, priority?, tags?),",
+			"Manage project tasks stored in .cortex/todos/. Each todo has a title, description, and plan.",
+			"The plan is a full implementation document in markdown — not just a checklist.",
+			"A good plan includes: Context (why), Changes (numbered sections with specific file paths, line numbers, code snippets), Files to modify, and Verification (how to test).",
+			"Actions: create (title, description?, plan?, assignee?, priority?, tags?),",
 			"update (id, status?, assignee?, priority?, title?, tags?),",
 			"list (filter_status?, filter_assignee?), get (id),",
 			"set-description (id, description) - replace the description,",
-			"set-plan (id, steps[]) - replace all plan steps,",
-			"add-step (id, step, step_number?) - add a plan step at position (or end),",
-			"complete-step (id, step_number) - toggle a plan step's completion,",
+			"set-plan (id, plan) - replace the full plan document,",
 			"delete (id), refine (id) - ask user clarifying questions to build description and plan.",
 			"Status: todo, in-progress, done, blocked. Priority: low, medium, high.",
 			"Assignees are team member names: team-lead, dev-backend, dev-frontend, architect, qa.",
@@ -645,11 +626,6 @@ export default function (pi: ExtensionAPI) {
 					}
 					const id = nextId(cwd);
 					const now = new Date().toISOString();
-					const planSteps: PlanStep[] = (params.steps ?? []).map((text, i) => ({
-						number: i + 1,
-						text,
-						completed: false,
-					}));
 					const todo: TodoFile = {
 						meta: {
 							id,
@@ -662,12 +638,12 @@ export default function (pi: ExtensionAPI) {
 							updated_at: now,
 						},
 						description: params.description ?? "",
-						plan: planSteps,
+						plan: params.plan ?? "",
 					};
 					writeTodo(cwd, todo);
-					const stepInfo = planSteps.length > 0 ? ` (${planSteps.length} plan steps)` : "";
+					const planInfo = todo.plan ? " (with plan)" : "";
 					return {
-						content: [{ type: "text", text: `Created todo #${id}: ${params.title}${stepInfo}` }],
+						content: [{ type: "text", text: `Created todo #${id}: ${params.title}${planInfo}` }],
 						details: { action: "create", todo: todo.meta },
 					};
 				}
@@ -709,8 +685,8 @@ export default function (pi: ExtensionAPI) {
 							const icon = STATUS_ICONS[t.meta.status] ?? "\u25cb";
 							const assignee = t.meta.assignee ? ` @${t.meta.assignee}` : "";
 							const priority = t.meta.priority ? ` [${t.meta.priority}]` : "";
-							const planProgress = t.plan.length > 0 ? ` [${t.plan.filter((s) => s.completed).length}/${t.plan.length} steps]` : "";
-							return `${icon} #${t.meta.id}: ${t.meta.title} (${t.meta.status})${priority}${planProgress}${assignee}`;
+							const hasPlan = t.plan ? " [has plan]" : "";
+							return `${icon} #${t.meta.id}: ${t.meta.title} (${t.meta.status})${priority}${hasPlan}${assignee}`;
 						})
 						.join("\n");
 					return {
@@ -735,13 +711,7 @@ export default function (pi: ExtensionAPI) {
 					text += `- **Created**: ${todo.meta.created_at}\n`;
 					text += `- **Updated**: ${todo.meta.updated_at}\n`;
 					if (todo.description) text += `\n## Description\n${todo.description}\n`;
-					if (todo.plan.length > 0) {
-						const completedCount = todo.plan.filter((s) => s.completed).length;
-						text += `\n## Plan (${completedCount}/${todo.plan.length})\n`;
-						for (const step of todo.plan) {
-							text += `${step.number}. [${step.completed ? "x" : " "}] ${step.text}\n`;
-						}
-					}
+					if (todo.plan) text += `\n## Plan\n${todo.plan}\n`;
 					return {
 						content: [{ type: "text", text }],
 						details: { action: "get", todo: todo.meta },
@@ -773,67 +743,15 @@ export default function (pi: ExtensionAPI) {
 					if (!todo) {
 						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
 					}
-					todo.plan = (params.steps ?? []).map((text, i) => ({
-						number: i + 1,
-						text,
-						completed: false,
-					}));
+					todo.plan = params.plan ?? "";
 					todo.meta.updated_at = new Date().toISOString();
 					writeTodo(cwd, todo);
 					return {
-						content: [{ type: "text", text: `Set ${todo.plan.length} plan steps for todo #${params.id}` }],
-						details: { action: "set-plan", todo: todo.meta, stepCount: todo.plan.length },
+						content: [{ type: "text", text: `Updated plan for todo #${params.id}` }],
+						details: { action: "set-plan", todo: todo.meta },
 					};
 				}
 
-				case "add-step": {
-					if (!params.id || !params.step) {
-						return { content: [{ type: "text", text: "Error: id and step required for add-step" }], details: {} };
-					}
-					const todo = readTodo(cwd, params.id);
-					if (!todo) {
-						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
-					}
-					const newStep: PlanStep = {
-						number: todo.plan.length + 1,
-						text: params.step,
-						completed: false,
-					};
-					if (params.step_number !== undefined && params.step_number >= 1 && params.step_number <= todo.plan.length + 1) {
-						todo.plan.splice(params.step_number - 1, 0, newStep);
-						todo.plan.forEach((s, i) => { s.number = i + 1; });
-					} else {
-						todo.plan.push(newStep);
-					}
-					todo.meta.updated_at = new Date().toISOString();
-					writeTodo(cwd, todo);
-					return {
-						content: [{ type: "text", text: `Added step ${newStep.number} to todo #${params.id}: ${params.step}` }],
-						details: { action: "add-step", todo: todo.meta, stepCount: todo.plan.length },
-					};
-				}
-
-				case "complete-step": {
-					if (!params.id || params.step_number === undefined) {
-						return { content: [{ type: "text", text: "Error: id and step_number required for complete-step" }], details: {} };
-					}
-					const todo = readTodo(cwd, params.id);
-					if (!todo) {
-						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
-					}
-					const step = todo.plan.find((s) => s.number === params.step_number);
-					if (!step) {
-						return { content: [{ type: "text", text: `Step ${params.step_number} not found in todo #${params.id}` }], details: {} };
-					}
-					step.completed = !step.completed;
-					todo.meta.updated_at = new Date().toISOString();
-					writeTodo(cwd, todo);
-					const completedCount = todo.plan.filter((s) => s.completed).length;
-					return {
-						content: [{ type: "text", text: `Step ${params.step_number} ${step.completed ? "completed" : "uncompleted"} (${completedCount}/${todo.plan.length})` }],
-						details: { action: "complete-step", todo: todo.meta, completedCount, totalSteps: todo.plan.length },
-					};
-				}
 
 				case "refine": {
 					if (!params.id) {
@@ -849,15 +767,11 @@ export default function (pi: ExtensionAPI) {
 					if (todo.meta.priority) context += `**Priority**: ${todo.meta.priority}\n`;
 					if (todo.meta.tags?.length) context += `**Tags**: ${todo.meta.tags.join(", ")}\n`;
 					if (todo.description) context += `\n**Current description**:\n${todo.description}\n`;
-					if (todo.plan.length > 0) {
-						context += `\n**Current plan**:\n`;
-						for (const s of todo.plan) {
-							context += `${s.number}. [${s.completed ? "x" : " "}] ${s.text}\n`;
-						}
-					}
-					context += `\nAsk the user clarifying questions to build a comprehensive description and implementation plan for this task. `;
+					if (todo.plan) context += `\n**Current plan**:\n${todo.plan}\n`;
+					context += `\nAsk the user clarifying questions to build a comprehensive description and a full implementation plan for this task. `;
 					context += `Do not make assumptions. Ask clear, concrete questions and wait for answers. `;
-					context += `After getting answers, use "set-description" to update the description and "set-plan" to set the plan steps.`;
+					context += `After getting answers, use "set-description" for the description and "set-plan" for the plan. `;
+					context += `The plan should be a full document with: Context (why this change), Changes (numbered sections with specific files, line numbers, code), Files to modify, and Verification (how to test).`;
 					return {
 						content: [{ type: "text", text: context }],
 						details: { action: "refine", todo: todo.meta },
@@ -886,7 +800,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.id) text += ` ${theme.fg("accent", `#${args.id}`)}`;
 			if (args.status) text += ` ${theme.fg("muted", `[${args.status}]`)}`;
 			if (args.assignee) text += ` ${theme.fg("dim", `@${args.assignee}`)}`;
-			if (args.step_number !== undefined) text += ` ${theme.fg("accent", `step ${args.step_number}`)}`;
+
 			return new Text(text, 0, 0);
 		},
 
@@ -903,12 +817,7 @@ export default function (pi: ExtensionAPI) {
 				const statusColor = todo.status === "done" ? "success" : todo.status === "blocked" ? "error" : "muted";
 				const assignee = todo.assignee ? theme.fg("dim", ` @${todo.assignee}`) : "";
 				let line = `${theme.fg(statusColor, icon)} ${theme.fg("accent", `#${todo.id}`)} ${theme.fg("muted", todo.title)}${assignee}`;
-				if (details.completedCount !== undefined) {
-					line += ` ${theme.fg("dim", `(${details.completedCount}/${details.totalSteps})`)}`;
-				}
-				if (details.stepCount !== undefined) {
-					line += ` ${theme.fg("dim", `(${details.stepCount} steps)`)}`;
-				}
+
 				return new Text(line, 0, 0);
 			}
 
