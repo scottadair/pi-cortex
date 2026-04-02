@@ -2,11 +2,12 @@
  * Todos Extension - Filesystem-based task management
  *
  * Stores todos as markdown files with JSON frontmatter in .cortex/todos/.
- * Each todo is a separate file, human-readable, and persists across sessions.
+ * Each todo has three sections: title (in frontmatter), description, and plan
+ * (ordered steps with completion tracking). Everything in one place.
  *
  * Includes a refine workflow: the agent asks clarifying questions about a todo,
  * the user answers via an interactive Q&A TUI (/answer), and the agent updates
- * the todo description with the refined details.
+ * the todo description and plan with the refined details.
  */
 
 import * as fs from "node:fs";
@@ -43,9 +44,16 @@ interface TodoMeta {
 	updated_at: string;
 }
 
+interface PlanStep {
+	number: number;
+	text: string;
+	completed: boolean;
+}
+
 interface TodoFile {
 	meta: TodoMeta;
-	body: string;
+	description: string;
+	plan: PlanStep[];
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +75,28 @@ function parseTodoFile(content: string): TodoFile | null {
 	if (!match) return null;
 	try {
 		const meta = JSON.parse(match[1]) as TodoMeta;
-		return { meta, body: match[2].trim() };
+		const body = match[2];
+
+		// Parse structured sections from body
+		const descMatch = body.match(/## Description\n([\s\S]*?)(?=\n## |\n*$)/);
+		const description = descMatch ? descMatch[1].trim() : body.trim();
+
+		const planMatch = body.match(/## Plan\n([\s\S]*?)(?=\n## |\n*$)/);
+		const plan: PlanStep[] = [];
+		if (planMatch) {
+			for (const line of planMatch[1].trim().split("\n")) {
+				const stepMatch = line.match(/^(\d+)\.\s+\[(x| )\]\s+(.+)$/);
+				if (stepMatch) {
+					plan.push({
+						number: parseInt(stepMatch[1], 10),
+						text: stepMatch[3].trim(),
+						completed: stepMatch[2] === "x",
+					});
+				}
+			}
+		}
+
+		return { meta, description, plan };
 	} catch {
 		return null;
 	}
@@ -75,7 +104,20 @@ function parseTodoFile(content: string): TodoFile | null {
 
 function serializeTodoFile(todo: TodoFile): string {
 	const frontmatter = JSON.stringify(todo.meta, null, 2);
-	const body = todo.body ? `\n${todo.body}\n` : "\n";
+	let body = "\n";
+
+	if (todo.description) {
+		body += `## Description\n${todo.description}\n\n`;
+	}
+
+	if (todo.plan.length > 0) {
+		body += `## Plan\n`;
+		for (const step of todo.plan) {
+			body += `${step.number}. [${step.completed ? "x" : " "}] ${step.text}\n`;
+		}
+		body += "\n";
+	}
+
 	return `---\n${frontmatter}\n---\n${body}`;
 }
 
@@ -359,13 +401,11 @@ class QnAComponent implements Component {
 			return line + " ".repeat(Math.max(0, width - len));
 		};
 
-		// Title
 		lines.push(padToWidth(this.dim("\u256d" + horizontalLine(boxWidth - 2) + "\u256e")));
 		const title = `${this.bold(this.cyan("Questions"))} ${this.dim(`(${this.currentIndex + 1}/${this.questions.length})`)}`;
 		lines.push(padToWidth(boxLine(title)));
 		lines.push(padToWidth(this.dim("\u251c" + horizontalLine(boxWidth - 2) + "\u2524")));
 
-		// Progress dots
 		const progressParts: string[] = [];
 		for (let i = 0; i < this.questions.length; i++) {
 			const answered = (this.answers[i]?.trim() || "").length > 0;
@@ -377,7 +417,6 @@ class QnAComponent implements Component {
 		lines.push(padToWidth(boxLine(progressParts.join(" "))));
 		lines.push(padToWidth(emptyBoxLine()));
 
-		// Current question
 		const q = this.questions[this.currentIndex];
 		const questionText = `${this.bold("Q:")} ${q.question}`;
 		for (const line of wrapTextWithAnsi(questionText, contentWidth)) {
@@ -391,7 +430,6 @@ class QnAComponent implements Component {
 		}
 		lines.push(padToWidth(emptyBoxLine()));
 
-		// Editor
 		const editorWidth = contentWidth - 4 - 3;
 		const editorLines = this.editor.render(editorWidth);
 		for (let i = 1; i < editorLines.length - 1; i++) {
@@ -400,7 +438,6 @@ class QnAComponent implements Component {
 		}
 		lines.push(padToWidth(emptyBoxLine()));
 
-		// Footer
 		if (this.showingConfirmation) {
 			lines.push(padToWidth(this.dim("\u251c" + horizontalLine(boxWidth - 2) + "\u2524")));
 			lines.push(padToWidth(boxLine(truncateToWidth(`${this.yellow("Submit all answers?")} ${this.dim("(Enter/y to confirm, Esc/n to cancel)")}`, contentWidth))));
@@ -463,12 +500,10 @@ class TodoListComponent {
 			return;
 		}
 
-		// r = refine selected todo
 		if (data === "r" && openTodos.length > 0) {
 			this.onClose("refine", openTodos[this.selectedIndex]);
 			return;
 		}
-		// w or Enter = work on selected todo
 		if ((data === "w" || matchesKey(data, Key.enter)) && openTodos.length > 0) {
 			this.onClose("work", openTodos[this.selectedIndex]);
 			return;
@@ -492,7 +527,6 @@ class TodoListComponent {
 			const openTodos = this.getOpenTodos();
 			const doneTodos = this.todos.filter((t) => t.meta.status === "done");
 
-			// Open todos (selectable)
 			const groups: Record<string, TodoFile[]> = { "todo": [], "in-progress": [], "blocked": [] };
 			for (const t of openTodos) {
 				(groups[t.meta.status] ?? groups["todo"]).push(t);
@@ -507,16 +541,16 @@ class TodoListComponent {
 					const statusColor = t.meta.status === "blocked" ? "error" : "muted";
 					const priority = t.meta.priority ? PRIORITY_LABELS[t.meta.priority] || "" : "";
 					const assignee = t.meta.assignee ? th.fg("dim", ` @${t.meta.assignee}`) : "";
+					const planInfo = t.plan.length > 0 ? th.fg("dim", ` [${t.plan.filter((s) => s.completed).length}/${t.plan.length}]`) : "";
 					const titleText = th.fg("text", t.meta.title);
 					const cursor = flatIndex === this.selectedIndex ? th.fg("accent", "\u25b6 ") : "  ";
 					const highlight = flatIndex === this.selectedIndex ? th.fg("accent", `#${t.meta.id}`) : th.fg("muted", `#${t.meta.id}`);
-					lines.push(truncateToWidth(`  ${cursor}${th.fg(statusColor, icon)} ${highlight} ${priority ? th.fg("warning", priority) + " " : ""}${titleText}${assignee}`, width));
+					lines.push(truncateToWidth(`  ${cursor}${th.fg(statusColor, icon)} ${highlight} ${priority ? th.fg("warning", priority) + " " : ""}${titleText}${planInfo}${assignee}`, width));
 					flatIndex++;
 				}
 				lines.push("");
 			}
 
-			// Done todos (not selectable, collapsed)
 			if (doneTodos.length > 0) {
 				lines.push(truncateToWidth(`  ${th.fg("success", "DONE")} ${th.fg("dim", `(${doneTodos.length})`)}`, width));
 				for (const t of doneTodos.slice(0, 3)) {
@@ -550,8 +584,9 @@ class TodoListComponent {
 function buildRefinePrompt(id: string, title: string): string {
 	return (
 		`Let's refine task #${id} "${title}": ` +
-		"Ask me for the missing details needed to refine this todo. Do not rewrite the todo yet and do not make assumptions. " +
-		"Ask clear, concrete questions and wait for my answers before drafting any structured description.\n\n"
+		"Ask me for the missing details needed to build a solid description and implementation plan for this todo. " +
+		"Do not rewrite the todo yet and do not make assumptions. " +
+		"Ask clear, concrete questions and wait for my answers before drafting any structured description or plan steps.\n\n"
 	);
 }
 
@@ -560,12 +595,12 @@ function buildRefinePrompt(id: string, title: string): string {
 // ---------------------------------------------------------------------------
 
 const TodoParams = Type.Object({
-	action: StringEnum(["create", "update", "list", "get", "append", "delete", "refine"] as const, {
+	action: StringEnum(["create", "update", "list", "get", "set-description", "set-plan", "add-step", "complete-step", "delete", "refine"] as const, {
 		description: "Action to perform",
 	}),
-	id: Type.Optional(Type.String({ description: "Todo ID (for update, get, append, delete, refine)" })),
+	id: Type.Optional(Type.String({ description: "Todo ID (required for most actions except create, list)" })),
 	title: Type.Optional(Type.String({ description: "Todo title (for create, update)" })),
-	description: Type.Optional(Type.String({ description: "Todo body text (for create)" })),
+	description: Type.Optional(Type.String({ description: "Description text (for create, set-description)" })),
 	status: Type.Optional(StringEnum(["todo", "in-progress", "done", "blocked"] as const, {
 		description: "Status (for create, update)",
 	})),
@@ -574,7 +609,9 @@ const TodoParams = Type.Object({
 		description: "Priority level (for create, update)",
 	})),
 	tags: Type.Optional(Type.Array(Type.String(), { description: "Tags (for create, update)" })),
-	text: Type.Optional(Type.String({ description: "Text to append (for append)" })),
+	steps: Type.Optional(Type.Array(Type.String(), { description: "Plan step descriptions (for create, set-plan)" })),
+	step: Type.Optional(Type.String({ description: "Single step text (for add-step)" })),
+	step_number: Type.Optional(Type.Number({ description: "Step number (for complete-step, add-step position)" })),
 	filter_status: Type.Optional(Type.String({ description: "Filter by status (for list)" })),
 	filter_assignee: Type.Optional(Type.String({ description: "Filter by assignee (for list)" })),
 });
@@ -584,11 +621,15 @@ export default function (pi: ExtensionAPI) {
 		name: "todo",
 		label: "Todo",
 		description: [
-			"Manage project tasks stored in .cortex/todos/.",
-			"Actions: create (title, description?, assignee?, priority?, tags?),",
+			"Manage project tasks stored in .cortex/todos/. Each todo has a title, description, and plan (ordered steps with completion tracking).",
+			"Actions: create (title, description?, steps?, assignee?, priority?, tags?),",
 			"update (id, status?, assignee?, priority?, title?, tags?),",
-			"list (filter_status?, filter_assignee?), get (id), append (id, text), delete (id),",
-			"refine (id) - read the todo and ask the user clarifying questions to build a detailed description.",
+			"list (filter_status?, filter_assignee?), get (id),",
+			"set-description (id, description) - replace the description,",
+			"set-plan (id, steps[]) - replace all plan steps,",
+			"add-step (id, step, step_number?) - add a plan step at position (or end),",
+			"complete-step (id, step_number) - toggle a plan step's completion,",
+			"delete (id), refine (id) - ask user clarifying questions to build description and plan.",
 			"Status: todo, in-progress, done, blocked. Priority: low, medium, high.",
 			"Assignees are team member names: team-lead, dev-backend, dev-frontend, architect, qa.",
 		].join(" "),
@@ -604,6 +645,11 @@ export default function (pi: ExtensionAPI) {
 					}
 					const id = nextId(cwd);
 					const now = new Date().toISOString();
+					const planSteps: PlanStep[] = (params.steps ?? []).map((text, i) => ({
+						number: i + 1,
+						text,
+						completed: false,
+					}));
 					const todo: TodoFile = {
 						meta: {
 							id,
@@ -615,11 +661,13 @@ export default function (pi: ExtensionAPI) {
 							created_at: now,
 							updated_at: now,
 						},
-						body: params.description ?? "",
+						description: params.description ?? "",
+						plan: planSteps,
 					};
 					writeTodo(cwd, todo);
+					const stepInfo = planSteps.length > 0 ? ` (${planSteps.length} plan steps)` : "";
 					return {
-						content: [{ type: "text", text: `Created todo #${id}: ${params.title}` }],
+						content: [{ type: "text", text: `Created todo #${id}: ${params.title}${stepInfo}` }],
 						details: { action: "create", todo: todo.meta },
 					};
 				}
@@ -661,7 +709,8 @@ export default function (pi: ExtensionAPI) {
 							const icon = STATUS_ICONS[t.meta.status] ?? "\u25cb";
 							const assignee = t.meta.assignee ? ` @${t.meta.assignee}` : "";
 							const priority = t.meta.priority ? ` [${t.meta.priority}]` : "";
-							return `${icon} #${t.meta.id}: ${t.meta.title} (${t.meta.status})${priority}${assignee}`;
+							const planProgress = t.plan.length > 0 ? ` [${t.plan.filter((s) => s.completed).length}/${t.plan.length} steps]` : "";
+							return `${icon} #${t.meta.id}: ${t.meta.title} (${t.meta.status})${priority}${planProgress}${assignee}`;
 						})
 						.join("\n");
 					return {
@@ -685,27 +734,104 @@ export default function (pi: ExtensionAPI) {
 					if (todo.meta.tags?.length) text += `- **Tags**: ${todo.meta.tags.join(", ")}\n`;
 					text += `- **Created**: ${todo.meta.created_at}\n`;
 					text += `- **Updated**: ${todo.meta.updated_at}\n`;
-					if (todo.body) text += `\n${todo.body}`;
+					if (todo.description) text += `\n## Description\n${todo.description}\n`;
+					if (todo.plan.length > 0) {
+						const completedCount = todo.plan.filter((s) => s.completed).length;
+						text += `\n## Plan (${completedCount}/${todo.plan.length})\n`;
+						for (const step of todo.plan) {
+							text += `${step.number}. [${step.completed ? "x" : " "}] ${step.text}\n`;
+						}
+					}
 					return {
 						content: [{ type: "text", text }],
 						details: { action: "get", todo: todo.meta },
 					};
 				}
 
-				case "append": {
-					if (!params.id || !params.text) {
-						return { content: [{ type: "text", text: "Error: id and text required for append" }], details: {} };
+				case "set-description": {
+					if (!params.id) {
+						return { content: [{ type: "text", text: "Error: id required for set-description" }], details: {} };
 					}
 					const todo = readTodo(cwd, params.id);
 					if (!todo) {
 						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
 					}
-					todo.body = todo.body ? `${todo.body}\n\n${params.text}` : params.text;
+					todo.description = params.description ?? "";
 					todo.meta.updated_at = new Date().toISOString();
 					writeTodo(cwd, todo);
 					return {
-						content: [{ type: "text", text: `Appended to todo #${params.id}` }],
-						details: { action: "append", todo: todo.meta },
+						content: [{ type: "text", text: `Updated description for todo #${params.id}` }],
+						details: { action: "set-description", todo: todo.meta },
+					};
+				}
+
+				case "set-plan": {
+					if (!params.id) {
+						return { content: [{ type: "text", text: "Error: id required for set-plan" }], details: {} };
+					}
+					const todo = readTodo(cwd, params.id);
+					if (!todo) {
+						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
+					}
+					todo.plan = (params.steps ?? []).map((text, i) => ({
+						number: i + 1,
+						text,
+						completed: false,
+					}));
+					todo.meta.updated_at = new Date().toISOString();
+					writeTodo(cwd, todo);
+					return {
+						content: [{ type: "text", text: `Set ${todo.plan.length} plan steps for todo #${params.id}` }],
+						details: { action: "set-plan", todo: todo.meta, stepCount: todo.plan.length },
+					};
+				}
+
+				case "add-step": {
+					if (!params.id || !params.step) {
+						return { content: [{ type: "text", text: "Error: id and step required for add-step" }], details: {} };
+					}
+					const todo = readTodo(cwd, params.id);
+					if (!todo) {
+						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
+					}
+					const newStep: PlanStep = {
+						number: todo.plan.length + 1,
+						text: params.step,
+						completed: false,
+					};
+					if (params.step_number !== undefined && params.step_number >= 1 && params.step_number <= todo.plan.length + 1) {
+						todo.plan.splice(params.step_number - 1, 0, newStep);
+						todo.plan.forEach((s, i) => { s.number = i + 1; });
+					} else {
+						todo.plan.push(newStep);
+					}
+					todo.meta.updated_at = new Date().toISOString();
+					writeTodo(cwd, todo);
+					return {
+						content: [{ type: "text", text: `Added step ${newStep.number} to todo #${params.id}: ${params.step}` }],
+						details: { action: "add-step", todo: todo.meta, stepCount: todo.plan.length },
+					};
+				}
+
+				case "complete-step": {
+					if (!params.id || params.step_number === undefined) {
+						return { content: [{ type: "text", text: "Error: id and step_number required for complete-step" }], details: {} };
+					}
+					const todo = readTodo(cwd, params.id);
+					if (!todo) {
+						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
+					}
+					const step = todo.plan.find((s) => s.number === params.step_number);
+					if (!step) {
+						return { content: [{ type: "text", text: `Step ${params.step_number} not found in todo #${params.id}` }], details: {} };
+					}
+					step.completed = !step.completed;
+					todo.meta.updated_at = new Date().toISOString();
+					writeTodo(cwd, todo);
+					const completedCount = todo.plan.filter((s) => s.completed).length;
+					return {
+						content: [{ type: "text", text: `Step ${params.step_number} ${step.completed ? "completed" : "uncompleted"} (${completedCount}/${todo.plan.length})` }],
+						details: { action: "complete-step", todo: todo.meta, completedCount, totalSteps: todo.plan.length },
 					};
 				}
 
@@ -722,10 +848,16 @@ export default function (pi: ExtensionAPI) {
 					if (todo.meta.assignee) context += `**Assignee**: ${todo.meta.assignee}\n`;
 					if (todo.meta.priority) context += `**Priority**: ${todo.meta.priority}\n`;
 					if (todo.meta.tags?.length) context += `**Tags**: ${todo.meta.tags.join(", ")}\n`;
-					if (todo.body) context += `\n**Current description**:\n${todo.body}\n`;
-					context += `\nAsk the user clarifying questions to build a comprehensive description for this task. `;
+					if (todo.description) context += `\n**Current description**:\n${todo.description}\n`;
+					if (todo.plan.length > 0) {
+						context += `\n**Current plan**:\n`;
+						for (const s of todo.plan) {
+							context += `${s.number}. [${s.completed ? "x" : " "}] ${s.text}\n`;
+						}
+					}
+					context += `\nAsk the user clarifying questions to build a comprehensive description and implementation plan for this task. `;
 					context += `Do not make assumptions. Ask clear, concrete questions and wait for answers. `;
-					context += `After getting answers, use the todo tool with action "append" to update the description.`;
+					context += `After getting answers, use "set-description" to update the description and "set-plan" to set the plan steps.`;
 					return {
 						content: [{ type: "text", text: context }],
 						details: { action: "refine", todo: todo.meta },
@@ -754,6 +886,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.id) text += ` ${theme.fg("accent", `#${args.id}`)}`;
 			if (args.status) text += ` ${theme.fg("muted", `[${args.status}]`)}`;
 			if (args.assignee) text += ` ${theme.fg("dim", `@${args.assignee}`)}`;
+			if (args.step_number !== undefined) text += ` ${theme.fg("accent", `step ${args.step_number}`)}`;
 			return new Text(text, 0, 0);
 		},
 
@@ -769,10 +902,14 @@ export default function (pi: ExtensionAPI) {
 				const icon = STATUS_ICONS[todo.status] ?? "\u25cb";
 				const statusColor = todo.status === "done" ? "success" : todo.status === "blocked" ? "error" : "muted";
 				const assignee = todo.assignee ? theme.fg("dim", ` @${todo.assignee}`) : "";
-				return new Text(
-					`${theme.fg(statusColor, icon)} ${theme.fg("accent", `#${todo.id}`)} ${theme.fg("muted", todo.title)}${assignee}`,
-					0, 0,
-				);
+				let line = `${theme.fg(statusColor, icon)} ${theme.fg("accent", `#${todo.id}`)} ${theme.fg("muted", todo.title)}${assignee}`;
+				if (details.completedCount !== undefined) {
+					line += ` ${theme.fg("dim", `(${details.completedCount}/${details.totalSteps})`)}`;
+				}
+				if (details.stepCount !== undefined) {
+					line += ` ${theme.fg("dim", `(${details.stepCount} steps)`)}`;
+				}
+				return new Text(line, 0, 0);
 			}
 
 			const text = result.content[0];
@@ -828,7 +965,6 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Find the last assistant message
 		const branch = ctx.sessionManager.getBranch();
 		let lastAssistantText: string | undefined;
 
@@ -857,10 +993,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Select extraction model (prefer haiku for speed)
 		const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
 
-		// Extract questions with loading spinner
 		const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
 			const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
 			loader.onAbort = () => done(null);
@@ -904,7 +1038,6 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Show interactive Q&A
 		const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
 			return new QnAComponent(extractionResult.questions, tui, done);
 		});
@@ -914,7 +1047,6 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Send answers as a message and trigger a new agent turn
 		pi.sendMessage(
 			{
 				customType: "answers",

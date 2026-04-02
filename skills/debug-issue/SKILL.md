@@ -21,11 +21,11 @@ Use the `team` tool to run the **architect** agent for analysis:
 team run architect "Analyze this bug: <description>. Find the relevant code, trace the execution path, and identify likely root causes."
 ```
 
-## 3. Create a Debugging Plan
-Save findings as a plan:
+## 3. Create a Todo
+Save findings as a todo with an investigation plan:
 
 ```
-plan create title="Fix: <bug description>" goal="<expected behavior>" steps=["Investigate <area>", "Fix <root cause>", "Add test coverage", "Verify fix"]
+todo create title="Fix: <bug description>" description="<root cause analysis>" steps=["Investigate <area>", "Fix <root cause>", "Add test coverage", "Verify fix"]
 ```
 
 ## 4. Implement Fix
@@ -37,8 +37,7 @@ team run dev-backend "Fix the bug: <specific fix based on analysis>. The root ca
 
 Mark progress:
 ```
-todo update id="<id>" status="done"
-plan complete-step id="<plan-id>" step_number=<n>
+todo complete-step id="<id>" step_number=<n>
 ```
 
 ## 5. Verify

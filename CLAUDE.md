@@ -13,10 +13,7 @@ cortex/
 ├── package.json            # pi package manifest
 ├── extensions/
 │   ├── team/index.ts       # Subagent orchestration (run/parallel/chain/list)
-│   ├── todos/index.ts      # Task management with filesystem persistence
-│   └── plans/              # Plan management with filesystem persistence
-│       ├── index.ts
-│       └── utils.ts
+│   └── todos/index.ts      # Task management with description + plan, /answer Q&A
 ├── agents/                 # Team member definitions (markdown + YAML frontmatter)
 │   ├── team-lead.md        # Orchestrator, delegates work
 │   ├── dev-backend.md      # Backend developer, full tool access
@@ -46,16 +43,13 @@ Registers a `team` tool and `/team` command. Spawns isolated `pi` subprocesses p
 - Agents defined as markdown with YAML frontmatter: `name`, `description`, `tools`, `model`, `thinking`
 
 ### Todos (`extensions/todos/`)
-Registers a `todo` tool and `/tasks` command. Persists as markdown files in `.cortex/todos/`.
-- **Actions**: `create`, `update`, `list`, `get`, `append`, `delete`
-- Each todo: JSON frontmatter (id, title, status, assignee, priority, tags) + markdown body
-- Status: `todo`, `in-progress`, `done`, `blocked`
-
-### Plans (`extensions/plans/`)
-Registers a `plan` tool and `/plan` command. Persists as markdown files in `.cortex/plans/`.
-- **Actions**: `create`, `update`, `add-step`, `complete-step`, `get`, `list`, `delete`
-- Each plan: JSON frontmatter (id, title, status) + Goal/Steps/Notes sections
-- Steps track completion via `[ ]`/`[x]` checkboxes
+Registers a `todo` tool, `/tasks` command, `/answer` command, and `Ctrl+.` shortcut. Persists as markdown files in `.cortex/todos/`.
+- Each todo has three sections: **title** (frontmatter), **description** (markdown), **plan** (ordered steps with `[ ]`/`[x]` checkboxes)
+- **Actions**: `create`, `update`, `list`, `get`, `set-description`, `set-plan`, `add-step`, `complete-step`, `delete`, `refine`
+- **Refine flow**: agent asks clarifying questions → user answers via `/answer` Q&A TUI → agent updates description and plan
+- `/tasks` TUI: arrow keys to select, `r` to refine, `w`/Enter to work on a todo
+- `/answer` (or `Ctrl+.`): extracts questions from last assistant message into interactive Q&A
+- Status: `todo`, `in-progress`, `done`, `blocked`. Priority: `low`, `medium`, `high`
 
 ## Writing Extensions
 
@@ -99,6 +93,5 @@ pi config                                        # enable/disable resources
 # /reload in pi session to hot-reload extensions
 ```
 
-Data directories created at runtime:
-- `.cortex/todos/` — todo markdown files
-- `.cortex/plans/` — plan markdown files
+Data directory created at runtime:
+- `.cortex/todos/` — todo markdown files (each with title, description, and plan)

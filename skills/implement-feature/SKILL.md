@@ -1,9 +1,9 @@
 ---
 name: implement-feature
 description: |
-  End-to-end feature implementation workflow. Scouts the codebase, creates an
-  implementation plan, implements in stages with the appropriate developer, and
-  runs QA review. Use when asked to implement a new feature or make substantial changes.
+  End-to-end feature implementation workflow. Creates a todo with description
+  and plan, implements in stages with the appropriate developer, and runs QA
+  review. Use when asked to implement a new feature or make substantial changes.
 ---
 
 # Implement Feature Workflow
@@ -17,43 +17,35 @@ Use the `team` tool to run the **architect** agent with the feature requirements
 team run architect "Analyze the codebase and create an implementation plan for: <feature description>"
 ```
 
-## 2. Save the Plan
-Use the `plan` tool to save the architect's output as a persistent plan:
+## 2. Create a Todo with Plan
+Use the `todo` tool to create a task with the architect's plan saved as steps:
 
 ```
-plan create title="<feature name>" goal="<goal>" steps=["step 1", "step 2", ...]
-plan update id="<plan-id>" status="active"
+todo create title="<feature name>" description="<goal and context>" steps=["step 1", "step 2", ...] priority="high"
 ```
 
-## 3. Create Tasks
-For each plan step, create a todo assigned to the appropriate team member:
-
-```
-todo create title="<step description>" assignee="dev-backend" priority="high"
-```
-
-Use `dev-backend` for server-side work and `dev-frontend` for UI work.
-
-## 4. Implement
-Run the appropriate developer agent for each task:
+## 3. Implement
+Run the appropriate developer agent for each step:
 
 ```
 team run dev-backend "<specific task with context from the plan>"
 team run dev-frontend "<specific task with context from the plan>"
 ```
 
-Mark todos as done after each step:
+Mark steps done as you go:
 ```
-todo update id="<id>" status="done"
-plan complete-step id="<plan-id>" step_number=<n>
+todo complete-step id="<id>" step_number=<n>
 ```
 
-## 5. QA Review
+## 4. QA Review
 After implementation, run the QA agent to review all changes:
 
 ```
 team run qa "Review the implementation of <feature>. Run tests and check for issues."
 ```
 
-## 6. Finalize
-Update plan status to completed when all steps are done and QA passes.
+## 5. Finalize
+Update the todo status when all steps are done and QA passes:
+```
+todo update id="<id>" status="done"
+```
