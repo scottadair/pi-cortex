@@ -42,7 +42,7 @@ interface AgentConfig {
 	model?: string;
 	thinking?: string;
 	systemPrompt: string;
-	source: "package" | "user" | "project";
+	source: "package" | "user" | "pi-project" | "project";
 	filePath: string;
 }
 
@@ -112,12 +112,12 @@ function discoverAgents(cwd: string): AgentDiscoveryResult {
 		agentMap.set(agent.name, agent);
 	}
 
-	// 3. Project-local agents (.pi/agents/)
+	// 3. Pi project-local agents (.pi/agents/)
 	let currentDir = cwd;
 	while (true) {
 		const candidate = path.join(currentDir, ".pi", "agents");
 		if (fs.existsSync(candidate)) {
-			for (const agent of loadAgentsFromDir(candidate, "project")) {
+			for (const agent of loadAgentsFromDir(candidate, "pi-project")) {
 				agentMap.set(agent.name, agent);
 			}
 			break;
@@ -125,6 +125,12 @@ function discoverAgents(cwd: string): AgentDiscoveryResult {
 		const parentDir = path.dirname(currentDir);
 		if (parentDir === currentDir) break;
 		currentDir = parentDir;
+	}
+
+	// 4. Cortex project-local agents (.cortex/agents/) — project root only, highest priority
+	const cortexAgentsDir = path.join(cwd, ".cortex", "agents");
+	for (const agent of loadAgentsFromDir(cortexAgentsDir, "project")) {
+		agentMap.set(agent.name, agent);
 	}
 
 	return { agents: Array.from(agentMap.values()) };
@@ -548,6 +554,7 @@ export default function (pi: ExtensionAPI) {
 			"Delegate tasks to specialized team members with isolated context.",
 			"Modes: run (single agent + task), parallel (tasks array), chain (sequential steps with {previous} placeholder), list (show available team members).",
 			"Available team members: team-lead, dev-backend, dev-frontend, architect, qa.",
+			"Agent discovery: package (cortex/agents/) → user (~/.pi/agent/agents/) → pi-project (.pi/agents/) → project (.cortex/agents/).",
 		].join(" "),
 		parameters: TeamParams,
 

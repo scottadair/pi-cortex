@@ -452,6 +452,49 @@ Cortex creates a `.cortex/` directory in your project:
 
 Add `.cortex/worktrees/` to your `.gitignore` to avoid committing temporary branches.
 
+### Per-Project Agent Configuration
+
+You can override or extend agents on a per-project basis by creating agent definition files in `.cortex/agents/`.
+
+**Agent Discovery Order** (later wins, full override by name):
+1. **Package-bundled** (`cortex/agents/`) — defaults shipped with Cortex
+2. **User-global** (`~/.pi/agent/agents/`) — personal overrides for all projects
+3. **Pi project-local** (`.pi/agents/`) — walks up directory tree to find project root
+4. **Cortex project-local** (`.cortex/agents/`) — project root only, highest priority
+
+**Example**: Override the backend developer for a Python project:
+
+Create `.cortex/agents/dev-backend.md`:
+
+```yaml
+---
+name: dev-backend
+description: Python backend developer specializing in FastAPI and SQLAlchemy
+tools: read, write, edit, bash, grep, find, ls
+model: claude-sonnet-4-5
+---
+
+You are a Python Backend Developer on the team.
+
+## Responsibilities
+- Implement FastAPI endpoints and Pydantic models
+- Design SQLAlchemy database schemas and migrations
+- Write pytest tests with fixtures
+- Follow PEP 8 and type hints
+
+## Approach
+1. Read existing code to understand patterns
+2. Follow FastAPI and SQLAlchemy best practices
+3. Write comprehensive tests with pytest
+4. Keep changes focused on the assigned task
+```
+
+**Key Behaviors**:
+- **No directory tree walk**: `.cortex/agents/` is checked only in the current working directory (project root), unlike `.pi/agents/` which walks up the tree
+- **Full override by name**: If you define `dev-backend.md` in `.cortex/agents/`, it completely replaces the default backend developer for that project
+- **Selective overrides**: You can override just one agent (e.g., `dev-backend.md`) while keeping the others as defaults
+- **Agent availability**: Use `team list` to see all available agents and their sources (`package`, `user`, `pi-project`, or `project`)
+
 ## Contributing
 
 Contributions are welcome! Here's how to get involved:
@@ -490,6 +533,12 @@ Key APIs:
 - `pi.on()` — handle lifecycle events
 
 Refer to the [pi documentation](https://github.com/mariozechner/pi-coding-agent) for full API details.
+
+**Example Use Cases**:
+- Override `dev-backend` for a Python project with FastAPI-specific expertise
+- Override `dev-frontend` for a React Native project with mobile-specific patterns
+- Add project-specific context to the `architect` for a complex domain
+- Customize the `qa` agent to run project-specific linters and test frameworks
 
 ---
 

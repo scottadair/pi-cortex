@@ -39,7 +39,11 @@ Install locally: `pi install /Users/scott/Source/Personal/cortex`
 ### Team (`extensions/team/`)
 Registers a `team` tool and `/team` command. Spawns isolated `pi` subprocesses per agent.
 - **Actions**: `run` (single agent), `parallel` (concurrent tasks), `chain` (sequential with `{previous}` placeholder), `list`
-- **Agent discovery**: cortex `agents/` dir → `~/.pi/agent/agents/` → `.pi/agents/`
+- **Agent discovery** (later wins, full override by name):
+  1. Package-bundled (`cortex/agents/`) — defaults
+  2. User-global (`~/.pi/agent/agents/`) — personal overrides
+  3. Pi project-local (`.pi/agents/`) — walks up directory tree
+  4. **Cortex project-local (`.cortex/agents/`)** — project root only, highest priority
 - Agents defined as markdown with YAML frontmatter: `name`, `description`, `tools`, `model`, `thinking`
 
 ### Todos (`extensions/todos/`)
