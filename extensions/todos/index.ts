@@ -264,12 +264,18 @@ function filterTodos(todos: TodoFile[], query: string): TodoFile[] {
 
 type TodoMenuAction = "work" | "refine" | "view" | "edit" | "close" | "reopen" | "delete" | "copyPath" | "copyText";
 
+type DisplayRow = 
+	| { type: "header"; label: string; count: number }
+	| { type: "todo"; todo: TodoFile; selectableIndex: number };
+
 class TodoSelectorComponent extends Container implements Focusable {
 	private searchInput: Input;
 	private listContainer: Container;
 	private allTodos: TodoFile[];
 	private filteredTodos: TodoFile[];
 	private selectedIndex = 0;
+	private showDone = false;
+	private displayRows: DisplayRow[] = [];
 	private onSelectCallback: (todo: TodoFile) => void;
 	private onCancelCallback: () => void;
 	private tui: TUI;
@@ -315,7 +321,7 @@ class TodoSelectorComponent extends Container implements Focusable {
 			this.searchInput.setValue(initialSearch);
 		}
 		this.searchInput.onSubmit = () => {
-			const selected = this.filteredTodos[this.selectedIndex];
+			const selected = this.getSelectedTodo();
 			if (selected) this.onSelectCallback(selected);
 		};
 		this.addChild(this.searchInput);
@@ -344,45 +350,136 @@ class TodoSelectorComponent extends Container implements Focusable {
 
 	private updateHeader(): void {
 		const openCount = this.allTodos.filter((t) => t.meta.status !== "done").length;
-		const closedCount = this.allTodos.length - openCount;
-		const title = `Todos (${openCount} open, ${closedCount} done)`;
+		const doneCount = this.allTodos.length - openCount;
+		const title = this.showDone
+			? `Todos (${openCount} open, ${doneCount} done)`
+			: `Todos (${openCount} open)`;
 		this.headerText.setText(this.theme.fg("accent", this.theme.bold(title)));
 	}
 
 	private updateHints(): void {
+		const doneHint = this.showDone ? "d hide done" : "d show done";
 		this.hintText.setText(
 			this.theme.fg(
 				"dim",
-				"Type to search \u00b7 \u2191\u2193 select \u00b7 Enter actions \u00b7 Ctrl+Shift+W work \u00b7 Ctrl+Shift+R refine \u00b7 Esc close",
+				`Type to search \u00b7 \u2191\u2193 select \u00b7 Enter actions \u00b7 Ctrl+Shift+W work \u00b7 Ctrl+Shift+R refine \u00b7 ${doneHint} \u00b7 Esc close`,
 			),
 		);
 	}
 
 	private applyFilter(query: string): void {
-		this.filteredTodos = filterTodos(this.allTodos, query);
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredTodos.length - 1));
+		const previousTodo = this.getSelectedTodo();
+		if (query.trim().length > 0) {
+			this.filteredTodos = filterTodos(this.allTodos, query);
+		} else {
+			this.filteredTodos = this.allTodos;
+		}
+		this.buildDisplayRows();
+		// Try to preserve selection
+		if (previousTodo) {
+			for (const row of this.displayRows) {
+				if (row.type === "todo" && row.todo === previousTodo) {
+					this.selectedIndex = row.selectableIndex;
+					break;
+				}
+			}
+		}
+		const selectableCount = this.getSelectableCount();
+		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, selectableCount - 1));
 		this.updateList();
+	}
+
+	private buildDisplayRows(): void {
+		const isSearching = this.searchInput.getValue().trim().length > 0;
+		this.displayRows = [];
+		let selectableIdx = 0;
+
+		if (isSearching) {
+			// Flat mode when searching — include all results, no headers
+			for (let i = 0; i < this.filteredTodos.length; i++) {
+				this.displayRows.push({ type: "todo", todo: this.filteredTodos[i], selectableIndex: selectableIdx++ });
+			}
+			return;
+		}
+
+		// Group order: in-progress, blocked, todo, (done if toggled)
+		const groups: Array<{ status: string; label: string }> = [
+			{ status: "in-progress", label: "In Progress" },
+			{ status: "blocked", label: "Blocked" },
+			{ status: "todo", label: "Open" },
+		];
+		if (this.showDone) {
+			groups.push({ status: "done", label: "Done" });
+		}
+
+		for (const group of groups) {
+			const items = this.filteredTodos.filter((t) => t.meta.status === group.status);
+			if (items.length === 0) continue; // hide empty groups
+			this.displayRows.push({ type: "header", label: group.label, count: items.length });
+			for (const todo of items) {
+				this.displayRows.push({ type: "todo", todo, selectableIndex: selectableIdx++ });
+			}
+		}
+	}
+
+	private getSelectableCount(): number {
+		let count = 0;
+		for (const row of this.displayRows) {
+			if (row.type === "todo") count++;
+		}
+		return count;
+	}
+
+	private getSelectedTodo(): TodoFile | undefined {
+		for (const row of this.displayRows) {
+			if (row.type === "todo" && row.selectableIndex === this.selectedIndex) {
+				return row.todo;
+			}
+		}
+		return undefined;
 	}
 
 	private updateList(): void {
 		this.listContainer.clear();
 
-		if (this.filteredTodos.length === 0) {
+		const selectableCount = this.getSelectableCount();
+		if (selectableCount === 0) {
 			this.listContainer.addChild(new Text(this.theme.fg("muted", "  No matching todos"), 0, 0));
 			return;
 		}
 
-		const maxVisible = 10;
+		// Clamp selectedIndex
+		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, selectableCount - 1));
+
+		// Find the display-row index of the selected todo for scroll centering
+		let selectedDisplayIdx = 0;
+		for (let i = 0; i < this.displayRows.length; i++) {
+			const row = this.displayRows[i];
+			if (row.type === "todo" && row.selectableIndex === this.selectedIndex) {
+				selectedDisplayIdx = i;
+				break;
+			}
+		}
+
+		const maxVisible = 12;
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredTodos.length - maxVisible),
+			Math.min(selectedDisplayIdx - Math.floor(maxVisible / 2), this.displayRows.length - maxVisible),
 		);
-		const endIndex = Math.min(startIndex + maxVisible, this.filteredTodos.length);
+		const endIndex = Math.min(startIndex + maxVisible, this.displayRows.length);
 
 		for (let i = startIndex; i < endIndex; i++) {
-			const todo = this.filteredTodos[i];
-			if (!todo) continue;
-			const isSelected = i === this.selectedIndex;
+			const row = this.displayRows[i];
+			if (!row) continue;
+
+			if (row.type === "header") {
+				const headerLine = this.theme.fg("accent", this.theme.bold(`  \u25b8 ${row.label} (${row.count})`));
+				this.listContainer.addChild(new Text(headerLine, 0, 0));
+				continue;
+			}
+
+			const isSelected = row.selectableIndex === this.selectedIndex;
+			const todo = row.todo;
 			const isDone = todo.meta.status === "done";
 			const prefix = isSelected ? this.theme.fg("accent", "\u25b6 ") : "  ";
 			const icon = STATUS_ICONS[todo.meta.status] ?? "\u25cb";
@@ -411,32 +508,31 @@ class TodoSelectorComponent extends Container implements Focusable {
 			this.listContainer.addChild(new Text(line, 0, 0));
 		}
 
-		if (startIndex > 0 || endIndex < this.filteredTodos.length) {
-			const scrollInfo = this.theme.fg(
-				"dim",
-				`  (${this.selectedIndex + 1}/${this.filteredTodos.length})`,
-			);
+		if (this.displayRows.length > maxVisible) {
+			const scrollInfo = this.theme.fg("dim", `  (${this.selectedIndex + 1}/${selectableCount})`);
 			this.listContainer.addChild(new Text(scrollInfo, 0, 0));
 		}
 	}
 
 	handleInput(keyData: string): void {
 		if (matchesKey(keyData, Key.up)) {
-			if (this.filteredTodos.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredTodos.length - 1 : this.selectedIndex - 1;
+			const selectableCount = this.getSelectableCount();
+			if (selectableCount === 0) return;
+			this.selectedIndex = this.selectedIndex === 0 ? selectableCount - 1 : this.selectedIndex - 1;
 			this.updateList();
 			this.tui.requestRender();
 			return;
 		}
 		if (matchesKey(keyData, Key.down)) {
-			if (this.filteredTodos.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredTodos.length - 1 ? 0 : this.selectedIndex + 1;
+			const selectableCount = this.getSelectableCount();
+			if (selectableCount === 0) return;
+			this.selectedIndex = this.selectedIndex === selectableCount - 1 ? 0 : this.selectedIndex + 1;
 			this.updateList();
 			this.tui.requestRender();
 			return;
 		}
 		if (matchesKey(keyData, Key.enter)) {
-			const selected = this.filteredTodos[this.selectedIndex];
+			const selected = this.getSelectedTodo();
 			if (selected) this.onSelectCallback(selected);
 			return;
 		}
@@ -445,13 +541,34 @@ class TodoSelectorComponent extends Container implements Focusable {
 			return;
 		}
 		if (matchesKey(keyData, Key.ctrlShift("r"))) {
-			const selected = this.filteredTodos[this.selectedIndex];
+			const selected = this.getSelectedTodo();
 			if (selected && this.onQuickAction) this.onQuickAction(selected, "refine");
 			return;
 		}
 		if (matchesKey(keyData, Key.ctrlShift("w"))) {
-			const selected = this.filteredTodos[this.selectedIndex];
+			const selected = this.getSelectedTodo();
 			if (selected && this.onQuickAction) this.onQuickAction(selected, "work");
+			return;
+		}
+		if ((keyData === "d" || keyData === "D") && this.searchInput.getValue().trim().length === 0) {
+			const previousTodo = this.getSelectedTodo();
+			this.showDone = !this.showDone;
+			this.buildDisplayRows();
+			// Preserve selection
+			if (previousTodo) {
+				for (const row of this.displayRows) {
+					if (row.type === "todo" && row.todo === previousTodo) {
+						this.selectedIndex = row.selectableIndex;
+						break;
+					}
+				}
+			}
+			const selectableCount = this.getSelectableCount();
+			this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, selectableCount - 1));
+			this.updateHeader();
+			this.updateHints();
+			this.updateList();
+			this.tui.requestRender();
 			return;
 		}
 		this.searchInput.handleInput(keyData);
