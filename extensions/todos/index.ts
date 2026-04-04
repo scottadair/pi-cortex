@@ -30,6 +30,8 @@ import {
 	Text,
 	type TUI,
 	fuzzyMatch,
+	truncateToWidth,
+	visibleWidth,
 } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
@@ -86,32 +88,33 @@ function parseTodoFile(content: string): TodoFile | null {
 		const planIndex = body.indexOf(planHeader);
 		const reportIndex = body.indexOf(reportHeader);
 
-		// Find all section headers and their positions
-		const sections = [
-			{ name: "description", index: descIndex, header: descHeader },
-			{ name: "plan", index: planIndex, header: planHeader },
-			{ name: "report", index: reportIndex, header: reportHeader },
-		].filter(s => s.index !== -1).sort((a, b) => a.index - b.index);
+		// Build sorted list of section positions
+		const sections: Array<{ header: string; index: number; key: "description" | "plan" | "completionReport" }> = [];
+		if (descIndex !== -1) sections.push({ header: descHeader, index: descIndex, key: "description" });
+		if (planIndex !== -1) sections.push({ header: planHeader, index: planIndex, key: "plan" });
+		if (reportIndex !== -1) sections.push({ header: reportHeader, index: reportIndex, key: "completionReport" });
+		sections.sort((a, b) => a.index - b.index);
 
 		let description = "";
 		let plan = "";
 		let completionReport = "";
 
-		// Extract each section's content (from its header to the next header or end)
-		for (let i = 0; i < sections.length; i++) {
-			const section = sections[i];
-			const start = section.index + section.header.length;
-			const end = i + 1 < sections.length ? sections[i + 1].index : body.length;
-			const content = body.substring(start, end).trim();
-
-			if (section.name === "description") description = content;
-			else if (section.name === "plan") plan = content;
-			else if (section.name === "report") completionReport = content;
+		if (sections.length === 0) {
+			// No sections found: treat whole body as description (backwards compat)
+			return { meta, description: body.trim(), plan: "", completionReport: "" };
 		}
 
-		// Backward compatibility: no sections found, treat as description
-		if (sections.length === 0 && body.trim()) {
-			return { meta, description: body.trim(), plan: "", completionReport: "" };
+		// Extract content between each section and the next (or end of body)
+		for (let i = 0; i < sections.length; i++) {
+			const section = sections[i];
+			const nextSection = sections[i + 1];
+			const startPos = section.index + section.header.length;
+			const endPos = nextSection ? nextSection.index : body.length;
+			const content = body.substring(startPos, endPos).trim();
+
+			if (section.key === "description") description = content;
+			else if (section.key === "plan") plan = content;
+			else if (section.key === "completionReport") completionReport = content;
 		}
 
 		return { meta, description, plan, completionReport };
@@ -266,7 +269,8 @@ type TodoMenuAction = "work" | "refine" | "view" | "edit" | "close" | "reopen" |
 
 type DisplayRow = 
 	| { type: "header"; label: string; count: number }
-	| { type: "todo"; todo: TodoFile; selectableIndex: number };
+	| { type: "todo"; todo: TodoFile; selectableIndex: number }
+	| { type: "spacer" };
 
 class TodoSelectorComponent extends Container implements Focusable {
 	private searchInput: Input;
@@ -412,9 +416,14 @@ class TodoSelectorComponent extends Container implements Focusable {
 			groups.push({ status: "done", label: "Done" });
 		}
 
+		let firstGroup = true;
 		for (const group of groups) {
 			const items = this.filteredTodos.filter((t) => t.meta.status === group.status);
 			if (items.length === 0) continue; // hide empty groups
+			if (!firstGroup) {
+				this.displayRows.push({ type: "spacer" });
+			}
+			firstGroup = false;
 			this.displayRows.push({ type: "header", label: group.label, count: items.length });
 			for (const todo of items) {
 				this.displayRows.push({ type: "todo", todo, selectableIndex: selectableIdx++ });
@@ -471,6 +480,11 @@ class TodoSelectorComponent extends Container implements Focusable {
 		for (let i = startIndex; i < endIndex; i++) {
 			const row = this.displayRows[i];
 			if (!row) continue;
+
+			if (row.type === "spacer") {
+				this.listContainer.addChild(new Text("", 0, 0));
+				continue;
+			}
 
 			if (row.type === "header") {
 				const headerLine = this.theme.fg("accent", this.theme.bold(`  \u25b8 ${row.label} (${row.count})`));
