@@ -171,6 +171,48 @@ function deleteProjectAgent(cwd: string, agentName: string): boolean {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Disabled agents management
+// ---------------------------------------------------------------------------
+
+function getDisabledAgentsPath(cwd: string): string {
+	return path.join(cwd, ".cortex", "agents", ".disabled.json");
+}
+
+function loadDisabledAgents(cwd: string): Set<string> {
+	const filePath = getDisabledAgentsPath(cwd);
+	try {
+		if (!fs.existsSync(filePath)) return new Set();
+		const content = fs.readFileSync(filePath, "utf-8");
+		const arr = JSON.parse(content);
+		return new Set(Array.isArray(arr) ? arr : []);
+	} catch {
+		return new Set();
+	}
+}
+
+function saveDisabledAgents(cwd: string, disabled: Set<string>): void {
+	const dir = path.join(cwd, ".cortex", "agents");
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(
+		getDisabledAgentsPath(cwd),
+		JSON.stringify([...disabled].sort(), null, 2),
+		"utf-8"
+	);
+}
+
+function disableAgent(cwd: string, name: string): void {
+	const disabled = loadDisabledAgents(cwd);
+	disabled.add(name);
+	saveDisabledAgents(cwd, disabled);
+}
+
+function enableAgent(cwd: string, name: string): void {
+	const disabled = loadDisabledAgents(cwd);
+	disabled.delete(name);
+	saveDisabledAgents(cwd, disabled);
+}
+
 interface AgentTemplate {
 	name: string;
 	description: string;
@@ -342,6 +384,12 @@ function discoverAgents(cwd: string): AgentDiscoveryResult {
 	const cortexAgentsDir = path.join(cwd, ".cortex", "agents");
 	for (const agent of loadAgentsFromDir(cortexAgentsDir, "project")) {
 		agentMap.set(agent.name, agent);
+	}
+
+	// 5. Filter out disabled agents
+	const disabled = loadDisabledAgents(cwd);
+	for (const name of disabled) {
+		agentMap.delete(name);
 	}
 
 	return { agents: Array.from(agentMap.values()) };
@@ -1354,6 +1402,7 @@ export default function (pi: ExtensionAPI) {
 		private theme: ExtensionContext["theme"];
 		private headerText: Text;
 		private hintText: Text;
+		private disabledCount = 0;
 
 		private _focused = false;
 		get focused(): boolean {
@@ -1368,6 +1417,7 @@ export default function (pi: ExtensionAPI) {
 			tui: TUI,
 			theme: ExtensionContext["theme"],
 			agents: AgentConfig[],
+			disabledCount: number,
 			onSelect: (agent: AgentConfig) => void,
 			onCancel: () => void,
 			private onQuickAction?: (agent: AgentConfig, action: "n" | "m" | "t" | "k" | "d" | "e") => void,
@@ -1377,6 +1427,7 @@ export default function (pi: ExtensionAPI) {
 			this.theme = theme;
 			this.allAgents = agents;
 			this.filteredAgents = agents;
+			this.disabledCount = disabledCount;
 			this.onSelectCallback = onSelect;
 			this.onCancelCallback = onCancel;
 
@@ -1409,8 +1460,9 @@ export default function (pi: ExtensionAPI) {
 			this.applyFilter(this.searchInput.getValue());
 		}
 
-		setAgents(agents: AgentConfig[]): void {
+		setAgents(agents: AgentConfig[], disabledCount: number): void {
 			this.allAgents = agents;
+			this.disabledCount = disabledCount;
 			this.updateHeader();
 			this.applyFilter(this.searchInput.getValue());
 			this.tui.requestRender();
@@ -1422,15 +1474,19 @@ export default function (pi: ExtensionAPI) {
 
 		private updateHeader(): void {
 			const projectCount = this.allAgents.filter((a) => a.source === "project").length;
-			const title = `Agents (${projectCount} project, ${this.allAgents.length} total)`;
+			const disabledHint = this.disabledCount > 0 ? `, ${this.disabledCount} disabled` : "";
+			const title = `Agents (${projectCount} project, ${this.allAgents.length} total${disabledHint})`;
 			this.headerText.setText(this.theme.fg("accent", this.theme.bold(title)));
 		}
 
 		private updateHints(): void {
+			const disabledHint = this.disabledCount > 0
+				? ` \u00b7 ${this.disabledCount} disabled (/agent enable)`
+				: "";
 			this.hintText.setText(
 				this.theme.fg(
 					"dim",
-					"Type to search \u00b7 \u2191\u2193 select \u00b7 Enter actions \u00b7 n new \u00b7 Esc close",
+					`Type to search \u00b7 \u2191\u2193 select \u00b7 Enter actions \u00b7 n new \u00b7 Esc close${disabledHint}`,
 				),
 			);
 		}
@@ -1589,6 +1645,9 @@ export default function (pi: ExtensionAPI) {
 				{ value: "tools", label: "tools", description: "Configure tools" },
 				{ value: "thinking", label: "thinking", description: "Set thinking level" },
 				{ value: "copyPath", label: "copy path", description: "Copy file path to clipboard" },
+				...(agent.source !== "project" 
+					? [{ value: "disable", label: "disable", description: "Hide this agent from the project" }]
+					: []),
 				...(agent.source === "project" ? [{ value: "delete", label: "delete", description: "Delete project agent" }] : []),
 			];
 
@@ -2000,13 +2059,36 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("agent", {
 		description: "Manage per-project agent configurations",
-		handler: async (_args, ctx) => {
+		handler: async (args, ctx) => {
+			const cwd = ctx.cwd;
+			const sub = (args || "").trim();
+
+			// Handle /agent enable subcommand
+			if (sub === "enable") {
+				if (!ctx.hasUI) {
+					ctx.ui.notify("/agent enable requires interactive mode", "error");
+					return;
+				}
+				const disabled = loadDisabledAgents(cwd);
+				if (disabled.size === 0) {
+					ctx.ui.notify("No disabled agents", "info");
+					return;
+				}
+				const choice = await ctx.ui.select(
+					"Enable agent",
+					[...disabled].sort()
+				);
+				if (choice) {
+					enableAgent(cwd, choice);
+					ctx.ui.notify(`Enabled agent ${choice}`, "info");
+				}
+				return;
+			}
+
 			if (!ctx.hasUI) {
 				ctx.ui.notify("/agent requires interactive mode", "error");
 				return;
 			}
-
-			const cwd = ctx.cwd;
 			let rootTui: TUI | null = null;
 
 			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
@@ -2045,7 +2127,8 @@ export default function (pi: ExtensionAPI) {
 
 				const refreshAgents = () => {
 					const { agents } = discoverAgents(cwd);
-					selector?.setAgents(agents);
+					const disabledCount = loadDisabledAgents(cwd).size;
+					selector?.setAgents(agents, disabledCount);
 				};
 
 				const copyAgentPathToClipboard = (agent: AgentConfig) => {
@@ -2068,6 +2151,14 @@ export default function (pi: ExtensionAPI) {
 				};
 
 				const handleAction = async (agent: AgentConfig, action: string) => {
+					if (action === "disable") {
+						disableAgent(cwd, agent.name);
+						refreshAgents();
+						if (ctx.hasUI) ctx.ui.notify(`Disabled agent ${agent.name}`, "info");
+						setActiveComponent(selector);
+						return;
+					}
+
 					if (action === "edit") {
 						const targetAgent = ensureProjectAgent(agent);
 						const filePath = path.resolve(targetAgent.filePath);
@@ -2252,10 +2343,12 @@ export default function (pi: ExtensionAPI) {
 				};
 
 				const { agents } = discoverAgents(cwd);
+				const disabledCount = loadDisabledAgents(cwd).size;
 				selector = new AgentSelectorComponent(
 					tui,
 					theme,
 					agents,
+					disabledCount,
 					(agent) => {
 						showActionMenu(agent);
 					},
