@@ -52,6 +52,7 @@ interface TodoFile {
 	meta: TodoMeta;
 	description: string;
 	plan: string;
+	completionReport: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,32 +81,40 @@ function parseTodoFile(content: string): TodoFile | null {
 		// so regex with lookahead for \n## would truncate it.
 		const descHeader = "## Description\n";
 		const planHeader = "## Plan\n";
+		const reportHeader = "## Completion Report\n";
 		const descIndex = body.indexOf(descHeader);
 		const planIndex = body.indexOf(planHeader);
+		const reportIndex = body.indexOf(reportHeader);
+
+		// Find all section headers and their positions
+		const sections = [
+			{ name: "description", index: descIndex, header: descHeader },
+			{ name: "plan", index: planIndex, header: planHeader },
+			{ name: "report", index: reportIndex, header: reportHeader },
+		].filter(s => s.index !== -1).sort((a, b) => a.index - b.index);
 
 		let description = "";
 		let plan = "";
+		let completionReport = "";
 
-		if (descIndex !== -1 && planIndex !== -1 && descIndex < planIndex) {
-			// Both sections present (normal order): description between headers, plan is everything after
-			description = body.substring(descIndex + descHeader.length, planIndex).trim();
-			plan = body.substring(planIndex + planHeader.length).trim();
-		} else if (descIndex !== -1 && planIndex !== -1 && planIndex < descIndex) {
-			// Both sections present (reversed order)
-			plan = body.substring(planIndex + planHeader.length, descIndex).trim();
-			description = body.substring(descIndex + descHeader.length).trim();
-		} else if (descIndex !== -1) {
-			// Only description
-			description = body.substring(descIndex + descHeader.length).trim();
-		} else if (planIndex !== -1) {
-			// Only plan
-			plan = body.substring(planIndex + planHeader.length).trim();
-		} else if (body.trim()) {
-			// No sections found: treat whole body as description (backwards compat)
-			return { meta, description: body.trim(), plan: "" };
+		// Extract each section's content (from its header to the next header or end)
+		for (let i = 0; i < sections.length; i++) {
+			const section = sections[i];
+			const start = section.index + section.header.length;
+			const end = i + 1 < sections.length ? sections[i + 1].index : body.length;
+			const content = body.substring(start, end).trim();
+
+			if (section.name === "description") description = content;
+			else if (section.name === "plan") plan = content;
+			else if (section.name === "report") completionReport = content;
 		}
 
-		return { meta, description, plan };
+		// Backward compatibility: no sections found, treat as description
+		if (sections.length === 0 && body.trim()) {
+			return { meta, description: body.trim(), plan: "", completionReport: "" };
+		}
+
+		return { meta, description, plan, completionReport };
 	} catch {
 		return null;
 	}
@@ -121,6 +130,10 @@ function serializeTodoFile(todo: TodoFile): string {
 
 	if (todo.plan) {
 		body += `## Plan\n${todo.plan}\n\n`;
+	}
+
+	if (todo.completionReport) {
+		body += `## Completion Report\n${todo.completionReport}\n\n`;
 	}
 
 	return `---\n${frontmatter}\n---\n${body}`;
@@ -1297,3 +1310,9 @@ export default function (pi: ExtensionAPI) {
 		await triggerAnswer(pi, ctx);
 	});
 }
+
+// ---------------------------------------------------------------------------
+// Exports for cross-extension use
+// ---------------------------------------------------------------------------
+
+export { readTodo, writeTodo, readAllTodos, type TodoFile, type TodoMeta };
