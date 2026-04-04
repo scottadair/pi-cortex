@@ -37,6 +37,41 @@ import { Type } from "@sinclair/typebox";
 import { isTmuxAvailable, openEditorPane } from "./tmux.ts";
 
 // ---------------------------------------------------------------------------
+// Active process tracking (for external cancellation)
+// ---------------------------------------------------------------------------
+
+const activeProcesses = new Set<import("node:child_process").ChildProcess>();
+
+export function killAllSubagents(): number {
+	let killed = 0;
+	for (const proc of activeProcesses) {
+		if (!proc.killed) {
+			proc.kill("SIGTERM");
+			killed++;
+			// Force kill after 5 seconds
+			setTimeout(() => {
+				if (!proc.killed) proc.kill("SIGKILL");
+			}, 5000);
+		}
+	}
+	activeProcesses.clear();
+	return killed;
+}
+
+export function hasRunningSubagents(): boolean {
+	for (const proc of activeProcesses) {
+		if (!proc.killed) return true;
+	}
+	return false;
+}
+
+// Expose on globalThis for escape-cancel extension
+if (typeof globalThis !== "undefined") {
+	(globalThis as any).__piKillAllSubagents = killAllSubagents;
+	(globalThis as any).__piHasRunningSubagents = hasRunningSubagents;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -678,6 +713,7 @@ async function runSingleAgent(
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
+			activeProcesses.add(proc);
 			let buffer = "";
 
 			const processLine = (line: string) => {
@@ -746,10 +782,14 @@ async function runSingleAgent(
 
 			proc.on("close", (code) => {
 				if (buffer.trim()) processLine(buffer);
+				activeProcesses.delete(proc);
 				resolve(code ?? 0);
 			});
 
-			proc.on("error", () => resolve(1));
+			proc.on("error", () => {
+				activeProcesses.delete(proc);
+				resolve(1);
+			});
 
 			if (signal) {
 				const killProc = () => {
