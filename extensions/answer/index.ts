@@ -1,19 +1,24 @@
 /**
  * Answer Extension - Q&A extraction and interactive answering
  *
- * Extracts questions from assistant responses using a fast model,
- * presents them in an interactive TUI, and sends answers back.
+ * Provides an ask_user tool for agent-to-user communication with three modes:
+ * - select: Pick from a list of options
+ * - input: Free-text entry
+ * - confirm: Yes/no question
+ *
+ * Also provides /answer command and Ctrl+. shortcut for extracting questions
+ * from the last assistant message and presenting them in an interactive TUI.
  *
  * Registers:
+ * - ask_user tool
  * - /answer command
  * - Ctrl+. shortcut
  *
  * Exports triggerAnswer() for use by other extensions (e.g. todos refine auto-trigger).
  */
 
-import { complete, type Model, type Api, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@mariozechner/pi-coding-agent";
-import { BorderedLoader } from "@mariozechner/pi-coding-agent";
+import { StringEnum } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import {
 	type Component,
 	Editor,
@@ -21,10 +26,12 @@ import {
 	Key,
 	matchesKey,
 	truncateToWidth,
+	Text,
 	type TUI,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 
 // ---------------------------------------------------------------------------
 // Structured output for question extraction
@@ -35,85 +42,70 @@ interface ExtractedQuestion {
 	context?: string;
 }
 
-interface ExtractionResult {
-	questions: ExtractedQuestion[];
-}
-
-const QA_SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering.
-
-Output a JSON object with this structure:
-{
-  "questions": [
-    {
-      "question": "The question text",
-      "context": "Optional context that helps answer the question"
-    }
-  ]
-}
-
-Rules:
-- Extract all questions that require user input
-- Keep questions in the order they appeared
-- Be concise with question text
-- Include context only when it provides essential information for answering
-- If no questions are found, return {"questions": []}
-
-Example output:
-{
-  "questions": [
-    {
-      "question": "What is your preferred database?",
-      "context": "We can only configure MySQL and PostgreSQL because of what is implemented."
-    },
-    {
-      "question": "Should we use TypeScript or JavaScript?"
-    }
-  ]
-}`;
-
 // ---------------------------------------------------------------------------
-// Model selection — prefer fast models for extraction
+// Simple regex-based question extraction
 // ---------------------------------------------------------------------------
 
-const CODEX_MODEL_ID = "gpt-5.1-codex-mini";
-const HAIKU_MODEL_ID = "claude-haiku-4-5";
+function extractQuestions(text: string): ExtractedQuestion[] {
+	const lines = text.split("\n");
+	const questions: ExtractedQuestion[] = [];
 
-async function selectExtractionModel(
-	currentModel: Model<Api>,
-	modelRegistry: ModelRegistry,
-): Promise<Model<Api>> {
-	const codexModel = modelRegistry.find("openai-codex", CODEX_MODEL_ID);
-	if (codexModel) {
-		const auth = await modelRegistry.getApiKeyAndHeaders(codexModel);
-		if (auth.ok) return codexModel;
+	for (let i = 0; i < lines.length; i++) {
+		// Strip bullet points, numbered list prefixes, and bold markers
+		const trimmed = lines[i]
+			.replace(/^\s*[-*•]\s*/, "")
+			.replace(/^\s*\d+[.)]\s*/, "")
+			.replace(/\*{1,2}/g, "")
+			.trim();
+		if (trimmed.endsWith("?") && trimmed.length > 10) {
+			questions.push({ question: trimmed });
+		}
 	}
 
-	const haikuModel = modelRegistry.find("anthropic", HAIKU_MODEL_ID);
-	if (!haikuModel) return currentModel;
-
-	const auth = await modelRegistry.getApiKeyAndHeaders(haikuModel);
-	if (!auth.ok) return currentModel;
-
-	return haikuModel;
+	return questions;
 }
 
 // ---------------------------------------------------------------------------
-// JSON parsing
+// ask_user tool parameters and details
 // ---------------------------------------------------------------------------
 
-function parseExtractionResult(text: string): ExtractionResult | null {
-	try {
-		let jsonStr = text;
-		const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-		if (jsonMatch) jsonStr = jsonMatch[1].trim();
+const AskUserParams = Type.Object({
+	question: Type.String({ description: "The question to ask the user" }),
+	mode: StringEnum(["select", "input", "confirm"] as const),
+	options: Type.Optional(Type.Array(Type.Object({
+		label: Type.String({ description: "Option label shown in the list" }),
+		markdown: Type.Optional(Type.String({ description: "Markdown preview shown when this option is highlighted" })),
+	}), { description: "Options for select mode (required)" })),
+	placeholder: Type.Optional(Type.String({ description: "Placeholder text for input mode" })),
+	detail: Type.Optional(Type.String({ description: "Detail text for confirm mode" })),
+});
 
-		const parsed = JSON.parse(jsonStr);
-		if (parsed && Array.isArray(parsed.questions)) return parsed as ExtractionResult;
-		return null;
-	} catch {
-		return null;
-	}
+interface AskUserDetails {
+	mode: string;
+	question: string;
+	answer?: string;
+	cancelled?: boolean;
+	selectedMarkdown?: string;
 }
+
+function buildAskUserDetails(input: {
+	mode: string;
+	question: string;
+	answer?: string;
+	cancelled?: boolean;
+	selectedMarkdown?: string;
+}): AskUserDetails {
+	const details: AskUserDetails = {
+		mode: input.mode,
+		question: input.question,
+	};
+	if (input.answer !== undefined) details.answer = input.answer;
+	if (input.cancelled) details.cancelled = true;
+	if (input.selectedMarkdown !== undefined) details.selectedMarkdown = input.selectedMarkdown;
+	return details;
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Interactive Q&A TUI component
@@ -321,10 +313,6 @@ export async function triggerAnswer(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 		ctx.ui.notify("/answer requires interactive mode", "error");
 		return;
 	}
-	if (!ctx.model) {
-		ctx.ui.notify("No model selected", "error");
-		return;
-	}
 
 	const branch = ctx.sessionManager.getBranch();
 	let lastAssistantText: string | undefined;
@@ -354,53 +342,16 @@ export async function triggerAnswer(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 		return;
 	}
 
-	const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+	// Extract questions using simple regex (lines ending in ?)
+	const questions = extractQuestions(lastAssistantText);
 
-	const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
-		const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
-		loader.onAbort = () => done(null);
-
-		const doExtract = async () => {
-			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
-			if (!auth.ok) throw new Error(auth.error);
-
-			const userMessage: UserMessage = {
-				role: "user",
-				content: [{ type: "text", text: lastAssistantText! }],
-				timestamp: Date.now(),
-			};
-
-			const response = await complete(
-				extractionModel,
-				{ systemPrompt: QA_SYSTEM_PROMPT, messages: [userMessage] },
-				{ apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
-			);
-
-			if (response.stopReason === "aborted") return null;
-
-			const responseText = response.content
-				.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
-				.map((c: any) => c.text)
-				.join("\n");
-
-			return parseExtractionResult(responseText);
-		};
-
-		doExtract().then(done).catch(() => done(null));
-		return loader;
-	});
-
-	if (extractionResult === null) {
-		ctx.ui.notify("Cancelled", "info");
-		return;
-	}
-	if (extractionResult.questions.length === 0) {
+	if (questions.length === 0) {
 		ctx.ui.notify("No questions found in the last message", "info");
 		return;
 	}
 
 	const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
-		return new QnAComponent(extractionResult.questions, tui, done);
+		return new QnAComponent(questions, tui, done);
 	});
 
 	if (answersResult === null) {
@@ -423,6 +374,126 @@ export async function triggerAnswer(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+	// Register ask_user tool
+	pi.registerTool({
+		name: "ask_user",
+		label: "Ask User",
+		description:
+			"Ask the user a question with inline interactive UI. " +
+			"Three modes: 'select' shows an inline picker with options. " +
+			"'input' prompts for free-text entry. 'confirm' asks a yes/no question. " +
+			"For select mode, provide options[] with label and optional markdown for each.",
+		parameters: AskUserParams,
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const { question, mode, options, placeholder, detail } = params;
+
+			if (mode === "select") {
+				if (!options || options.length === 0) {
+					return {
+						content: [{ type: "text" as const, text: "Error: options[] required for select mode" }],
+					};
+				}
+
+				const labels = options.map((o) => o.label);
+				const result = await ctx.ui.select(question, labels);
+
+				if (result == null) {
+					return {
+						content: [{ type: "text" as const, text: "[User cancelled]" }],
+						details: buildAskUserDetails({ mode, question, cancelled: true }),
+					};
+				}
+				const opt = options.find((o) => o.label === result);
+				return {
+					content: [{ type: "text" as const, text: `User selected: ${result}` }],
+					details: buildAskUserDetails({
+						mode, question, answer: result,
+						selectedMarkdown: opt?.markdown,
+					}),
+				};
+			}
+
+			if (mode === "input") {
+				const answer = await ctx.ui.input(question, placeholder || "");
+				if (!answer) {
+					return {
+						content: [{ type: "text" as const, text: "[User cancelled]" }],
+						details: buildAskUserDetails({ mode, question, cancelled: true }),
+					};
+				}
+				return {
+					content: [{ type: "text" as const, text: `User answered: ${answer}` }],
+					details: buildAskUserDetails({ mode, question, answer }),
+				};
+			}
+
+			if (mode === "confirm") {
+				const confirmed = await ctx.ui.confirm(
+					question,
+					detail || "",
+					{ timeout: 60000 },
+				);
+				return {
+					content: [{ type: "text" as const, text: confirmed ? "User confirmed: Yes" : "User declined: No" }],
+					details: buildAskUserDetails({ mode, question, answer: confirmed ? "Yes" : "No" }),
+				};
+			}
+
+			return {
+				content: [{ type: "text" as const, text: `Error: unknown mode '${mode}'` }],
+			};
+		},
+
+		renderCall(args, theme) {
+			let text = theme.fg("toolTitle", theme.bold("ask_user "));
+			text += theme.fg("muted", args.mode || "");
+			text += theme.fg("dim", `  "${args.question}"`);
+			if (args.mode === "select" && args.options?.length) {
+				text += theme.fg("dim", `  ${args.options.length} options`);
+			}
+			return new Text(text, 0, 0);
+		},
+
+		renderResult(result, { expanded }, theme) {
+			const details = result.details as AskUserDetails | undefined;
+			if (!details) {
+				const text = result.content[0];
+				return new Text(text?.type === "text" ? text.text : "", 0, 0);
+			}
+
+			if (details.cancelled) {
+				return new Text(theme.fg("dim", "[Cancelled]"), 0, 0);
+			}
+
+			if (details.mode === "confirm") {
+				const color = details.answer === "Yes" ? "success" : "warning";
+				const label = details.answer === "Yes" ? "Confirmed" : "Declined";
+				return new Text(theme.fg(color, label), 0, 0);
+			}
+
+			// select or input
+			const summary = details.mode === "select"
+				? `Selected: ${details.answer}`
+				: `Answer: ${details.answer}`;
+
+			if (expanded && details.selectedMarkdown) {
+				// Show summary + markdown preview as plain text lines
+				const preview = details.selectedMarkdown
+					.split("\n")
+					.slice(0, 8)
+					.map((l) => theme.fg("muted", "  " + l))
+					.join("\n");
+				return new Text(
+					theme.fg("accent", summary) + "\n" + preview,
+					0, 0,
+				);
+			}
+
+			return new Text(theme.fg("accent", summary), 0, 0);
+		},
+	});
+
 	pi.registerCommand("answer", {
 		description: "Extract questions from last assistant message into interactive Q&A",
 		handler: (_args, ctx) => triggerAnswer(pi, ctx),
