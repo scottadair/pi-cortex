@@ -294,6 +294,29 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
+				// Store merge commit SHA for stable report generation
+				const mergeCommit = execSync("git rev-parse HEAD", { cwd: repoRoot, encoding: "utf-8" }).trim();
+
+				// Generate completion report (non-blocking)
+				if (params.todo_id) {
+					try {
+						const { generateCompletionReport } = await import("../report/index.ts");
+						const { readTodo, writeTodo } = await import("../todos/index.ts");
+
+						const report = generateCompletionReport(repoRoot, match.branch, baseBranch, mergeCommit);
+						const todo = readTodo(ctx.cwd, params.todo_id);
+
+						if (todo) {
+							todo.completionReport = report;
+							todo.meta.updated_at = new Date().toISOString();
+							writeTodo(ctx.cwd, todo);
+						}
+					} catch (err: any) {
+						// Report generation failure should not block the merge
+						console.error(`Failed to generate completion report: ${err.message}`);
+					}
+				}
+
 				return {
 					content: [{ type: "text", text: `Merged ${match.branch} into ${baseBranch}` }],
 					details: { branch: match.branch, baseBranch },
