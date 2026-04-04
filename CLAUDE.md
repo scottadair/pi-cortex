@@ -13,6 +13,9 @@ cortex/
 ├── package.json            # pi package manifest
 ├── extensions/
 │   ├── answer/index.ts     # Q&A extraction and interactive answering (/answer, Ctrl+.)
+│   ├── security/
+│   │   ├── index.ts        # Security guard hooks and /security command
+│   │   └── engine.ts       # Stateless threat scanning engine
 │   ├── team/index.ts       # Subagent orchestration (run/parallel/chain/list)
 │   └── todos/index.ts      # Task management with description + plan
 ├── agents/                 # Team member definitions (markdown + YAML frontmatter)
@@ -63,6 +66,17 @@ Registers a `todo` tool and `/tasks` command. Persists as markdown files in `.co
 - `/tasks` TUI: arrow keys to select, `r` to refine, `w`/Enter to work on a todo
 - Status: `todo`, `in-progress`, `done`, `blocked`. Priority: `low`, `medium`, `high`
 
+### Security Guard (`extensions/security/`)
+Three-layer defense system that protects agents from executing dangerous commands, leaking credentials, and following malicious instructions embedded in files.
+- **Layer 1 — `tool_call` hook**: Blocks dangerous bash commands (rm -rf, sudo, pipe-to-shell), writes to protected paths (.ssh/, .aws/), and injection attempts before execution
+- **Layer 2 — `tool_result` hook**: Scans file contents and command output for prompt injection patterns; strips matched injections before they reach the agent's context
+- **Layer 3 — `before_agent_start` hook**: Appends security rules to the system prompt, instructing the agent to never follow embedded instructions that ask it to ignore rules, reveal prompts, or exfiltrate data
+- **Default rules**: Blocks `rm -rf /`, `curl|bash`, `sudo`, disk formatting, fork bombs; protects SSH keys, AWS credentials, GPG keys, production env files; detects instruction override, role hijacking, and prompt extraction attempts
+- **Allowlist**: Bypass scanning for safe patterns like `curl localhost`, `rm -rf node_modules`, etc.
+- **Audit log**: All threats logged to `.cortex/security-audit.log` (1MB max, rotates to `.bak`)
+- **Configuration**: Customize rules via `.cortex/security-policy.json` (overrides defaults)
+- **Commands**: `/security status` (stats + policy summary), `/security log` (recent audit entries), `/security reload` (re-read policy file)
+
 ## Writing Extensions
 
 Extensions export a default function receiving `ExtensionAPI`:
@@ -107,3 +121,5 @@ pi config                                        # enable/disable resources
 
 Data directory created at runtime:
 - `.cortex/todos/` — todo markdown files (each with title, description, and plan)
+- `.cortex/security-audit.log` — security event log (threats blocked, warned, redacted)
+- `.cortex/security-policy.json` — custom security rules (optional)
