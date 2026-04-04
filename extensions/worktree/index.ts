@@ -379,6 +379,26 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			// Generate completion report (never block on failure)
+			if (params.todo_id) {
+				try {
+					const { generateCompletionReport } = await import("../report/index.ts");
+					const { readTodo, writeTodo } = await import("../todos/index.ts");
+					
+					const report = generateCompletionReport(repoRoot, match.branch, baseBranch);
+					const todo = readTodo(ctx.cwd, params.todo_id);
+					
+					if (todo) {
+						todo.completionReport = report;
+						todo.meta.updated_at = new Date().toISOString();
+						writeTodo(ctx.cwd, todo);
+					}
+				} catch (reportErr: any) {
+					// Report generation failure should never block the merge
+					console.warn(`Warning: Failed to generate completion report: ${reportErr.message}`);
+				}
+			}
+
 			return {
 				content: [{ type: "text", text: `Unknown action: ${params.action}` }],
 				details: {},
