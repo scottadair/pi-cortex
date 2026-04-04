@@ -34,7 +34,6 @@ import {
 	type TUI,
 } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { stringify as stringifyYaml } from "yaml";
 import { isTmuxAvailable, openEditorPane } from "./tmux.ts";
 
 // ---------------------------------------------------------------------------
@@ -60,8 +59,12 @@ function ensureProjectAgentsDir(cwd: string): string {
 }
 
 function serializeAgentFile(frontmatter: Record<string, any>, body: string): string {
-	const yaml = stringifyYaml(frontmatter).trim();
-	return `---\n${yaml}\n---\n\n${body}`;
+	const lines: string[] = [];
+	for (const [key, value] of Object.entries(frontmatter)) {
+		if (value === undefined || value === null) continue;
+		lines.push(`${key}: ${String(value)}`);
+	}
+	return `---\n${lines.join("\n")}\n---\n\n${body}`;
 }
 
 function copyAgentToProject(cwd: string, agent: AgentConfig): string {

@@ -75,15 +75,33 @@ function parseTodoFile(content: string): TodoFile | null {
 		const meta = JSON.parse(match[1]) as TodoMeta;
 		const body = match[2];
 
-		// Parse structured sections from body
-		const descMatch = body.match(/## Description\n([\s\S]*?)(?=\n## |\n*$)/);
-		const description = descMatch ? descMatch[1].trim() : "";
+		// Use indexOf for robust section extraction.
+		// Plan content often contains ## headers (## Context, ## Changes, etc.)
+		// so regex with lookahead for \n## would truncate it.
+		const descHeader = "## Description\n";
+		const planHeader = "## Plan\n";
+		const descIndex = body.indexOf(descHeader);
+		const planIndex = body.indexOf(planHeader);
 
-		const planMatch = body.match(/## Plan\n([\s\S]*?)(?=\n## |\n*$)/);
-		const plan = planMatch ? planMatch[1].trim() : "";
+		let description = "";
+		let plan = "";
 
-		// If no sections found, treat whole body as description (backwards compat)
-		if (!descMatch && !planMatch && body.trim()) {
+		if (descIndex !== -1 && planIndex !== -1 && descIndex < planIndex) {
+			// Both sections present (normal order): description between headers, plan is everything after
+			description = body.substring(descIndex + descHeader.length, planIndex).trim();
+			plan = body.substring(planIndex + planHeader.length).trim();
+		} else if (descIndex !== -1 && planIndex !== -1 && planIndex < descIndex) {
+			// Both sections present (reversed order)
+			plan = body.substring(planIndex + planHeader.length, descIndex).trim();
+			description = body.substring(descIndex + descHeader.length).trim();
+		} else if (descIndex !== -1) {
+			// Only description
+			description = body.substring(descIndex + descHeader.length).trim();
+		} else if (planIndex !== -1) {
+			// Only plan
+			plan = body.substring(planIndex + planHeader.length).trim();
+		} else if (body.trim()) {
+			// No sections found: treat whole body as description (backwards compat)
 			return { meta, description: body.trim(), plan: "" };
 		}
 

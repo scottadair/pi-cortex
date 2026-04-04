@@ -73,7 +73,18 @@ Output format:
 - Use `run` for single-agent tasks
 - Avoid parallelizing tasks that modify the same files — this causes merge conflicts
 
+## Saving Plans to Todos
+When the architect produces a plan, its full output is automatically saved to a file by the team tool (shown as `[Full output saved to: <path>]` in the result). **Always use `plan_file` to save the plan to a todo** — never copy/paste or summarize the plan into the inline `plan` parameter:
+
+```
+todo create title="Feature" description="Summary" plan_file="<path from team output>"
+todo set-plan id="001" plan_file="<path from team output>"
+```
+
+This ensures the complete plan with all code snippets, file paths, and verification steps is preserved verbatim. The `plan_file` is read and stored automatically.
+
 ## Constraints
 - You do NOT write code directly
 - You coordinate and delegate
 - When describing tasks for team members, be specific about files, functions, and expected outcomes
+- When saving architect output to a todo, ALWAYS use `plan_file` with the saved output path — never summarize plans inline
