@@ -69,6 +69,40 @@ function extractQuestions(text: string): ExtractedQuestion[] {
 // ask_user tool parameters and details
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse a multi-question prompt into individual questions.
+ * Detects numbered lists (1., 2.), bold-prefixed items (**Q:**), and bullet points.
+ * Returns null if only a single question is detected.
+ */
+function parseMultipleQuestions(text: string): string[] | null {
+	// Try numbered list: "1." "2." etc. (with optional **bold** prefix)
+	const numberedRegex = /^\s*\d+\.\s+/gm;
+	const numberedMatches = text.match(numberedRegex);
+	if (numberedMatches && numberedMatches.length >= 2) {
+		// Split on numbered prefixes, keep only numbered items
+		const parts = text.split(/^(?=\s*\d+\.\s+)/m)
+			.map(s => s.trim())
+			.filter(s => /^\d+\.\s+/.test(s));
+		if (parts.length >= 2) {
+			return parts;
+		}
+	}
+
+	// Try bullet points: "- " or "* " at line start
+	const bulletRegex = /^\s*[-*]\s+/gm;
+	const bulletMatches = text.match(bulletRegex);
+	if (bulletMatches && bulletMatches.length >= 2) {
+		const parts = text.split(/^(?=\s*[-*]\s+)/m)
+			.map(s => s.trim())
+			.filter(s => /^[-*]\s+/.test(s));
+		if (parts.length >= 2) {
+			return parts;
+		}
+	}
+
+	return null;
+}
+
 const AskUserParams = Type.Object({
 	question: Type.String({ description: "The question to ask the user" }),
 	mode: StringEnum(["select", "input", "confirm"] as const),
@@ -415,6 +449,39 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (mode === "input") {
+				// Check for multiple questions in the prompt
+				const questions = parseMultipleQuestions(question);
+
+				if (questions && questions.length >= 2) {
+					// Sequential multi-question flow
+					const answers: string[] = [];
+					for (let i = 0; i < questions.length; i++) {
+						const qText = `(${i + 1}/${questions.length}) ${questions[i]}`;
+						const answer = await ctx.ui.input(qText, placeholder || "");
+						if (answer == null) {
+							// User cancelled — return partial answers collected so far
+							if (answers.length === 0) {
+								return {
+									content: [{ type: "text" as const, text: "[User cancelled]" }],
+									details: buildAskUserDetails({ mode, question, cancelled: true }),
+								};
+							}
+							break;
+						}
+						answers.push(answer.trim() || "(skipped)");
+					}
+
+					// Compile answers with question context
+					const compiled = answers
+						.map((a, i) => `${questions[i]}\n**Answer:** ${a}`)
+						.join("\n\n");
+					return {
+						content: [{ type: "text" as const, text: `User answered ${answers.length}/${questions.length} questions:\n\n${compiled}` }],
+						details: buildAskUserDetails({ mode, question, answer: compiled }),
+					};
+				}
+
+				// Single question — original behavior
 				const answer = await ctx.ui.input(question, placeholder || "");
 				if (!answer) {
 					return {
