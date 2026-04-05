@@ -1,9 +1,9 @@
 /**
  * Todos Extension - Filesystem-based task management
  *
- * Stores todos as markdown files with JSON frontmatter in .cortex/todos/.
- * Each todo has three sections: title (in frontmatter), description, and plan
- * (ordered steps with completion tracking). Everything in one place.
+ * Stores todos as separate .json (metadata) and .md (content) files in .cortex/todos/.
+ * Each todo has three sections: title (in metadata), description, and plan
+ * (ordered steps with completion tracking). Lazy migration from legacy frontmatter format.
  *
  * Includes a refine workflow: the agent asks clarifying questions about a todo,
  * the user answers via an interactive Q&A TUI (/answer), and the agent updates
@@ -71,7 +71,57 @@ function ensureTodosDir(cwd: string): string {
 	return dir;
 }
 
-function parseTodoFile(content: string): TodoFile | null {
+/**
+ * Parse sections from pure markdown body (new format)
+ * Returns { description, plan, completionReport }
+ */
+function parseSections(body: string): { description: string; plan: string; completionReport: string } {
+	// Use indexOf for robust section extraction.
+	// Plan content often contains ## headers (## Context, ## Changes, etc.)
+	// so regex with lookahead for \n## would truncate it.
+	const descHeader = "## Description\n";
+	const planHeader = "## Plan\n";
+	const reportHeader = "## Completion Report\n";
+	const descIndex = body.indexOf(descHeader);
+	const planIndex = body.indexOf(planHeader);
+	const reportIndex = body.indexOf(reportHeader);
+
+	// Build sorted list of section positions
+	const sections: Array<{ header: string; index: number; key: "description" | "plan" | "completionReport" }> = [];
+	if (descIndex !== -1) sections.push({ header: descHeader, index: descIndex, key: "description" });
+	if (planIndex !== -1) sections.push({ header: planHeader, index: planIndex, key: "plan" });
+	if (reportIndex !== -1) sections.push({ header: reportHeader, index: reportIndex, key: "completionReport" });
+	sections.sort((a, b) => a.index - b.index);
+
+	let description = "";
+	let plan = "";
+	let completionReport = "";
+
+	if (sections.length === 0) {
+		// No sections found: treat whole body as description (backwards compat)
+		return { description: body.trim(), plan: "", completionReport: "" };
+	}
+
+	// Extract content between each section and the next (or end of body)
+	for (let i = 0; i < sections.length; i++) {
+		const section = sections[i];
+		const nextSection = sections[i + 1];
+		const startPos = section.index + section.header.length;
+		const endPos = nextSection ? nextSection.index : body.length;
+		const content = body.substring(startPos, endPos).trim();
+
+		if (section.key === "description") description = content;
+		else if (section.key === "plan") plan = content;
+		else if (section.key === "completionReport") completionReport = content;
+	}
+
+	return { description, plan, completionReport };
+}
+
+/**
+ * Parse legacy todo file with frontmatter (backward compat)
+ */
+function parseLegacyTodoFile(content: string): TodoFile | null {
 	const match = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
 	if (!match) return null;
 	try {
@@ -79,55 +129,18 @@ function parseTodoFile(content: string): TodoFile | null {
 		const sanitized = match[1].replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, " ");
 		const meta = JSON.parse(sanitized) as TodoMeta;
 		const body = match[2];
-
-		// Use indexOf for robust section extraction.
-		// Plan content often contains ## headers (## Context, ## Changes, etc.)
-		// so regex with lookahead for \n## would truncate it.
-		const descHeader = "## Description\n";
-		const planHeader = "## Plan\n";
-		const reportHeader = "## Completion Report\n";
-		const descIndex = body.indexOf(descHeader);
-		const planIndex = body.indexOf(planHeader);
-		const reportIndex = body.indexOf(reportHeader);
-
-		// Build sorted list of section positions
-		const sections: Array<{ header: string; index: number; key: "description" | "plan" | "completionReport" }> = [];
-		if (descIndex !== -1) sections.push({ header: descHeader, index: descIndex, key: "description" });
-		if (planIndex !== -1) sections.push({ header: planHeader, index: planIndex, key: "plan" });
-		if (reportIndex !== -1) sections.push({ header: reportHeader, index: reportIndex, key: "completionReport" });
-		sections.sort((a, b) => a.index - b.index);
-
-		let description = "";
-		let plan = "";
-		let completionReport = "";
-
-		if (sections.length === 0) {
-			// No sections found: treat whole body as description (backwards compat)
-			return { meta, description: body.trim(), plan: "", completionReport: "" };
-		}
-
-		// Extract content between each section and the next (or end of body)
-		for (let i = 0; i < sections.length; i++) {
-			const section = sections[i];
-			const nextSection = sections[i + 1];
-			const startPos = section.index + section.header.length;
-			const endPos = nextSection ? nextSection.index : body.length;
-			const content = body.substring(startPos, endPos).trim();
-
-			if (section.key === "description") description = content;
-			else if (section.key === "plan") plan = content;
-			else if (section.key === "completionReport") completionReport = content;
-		}
-
-		return { meta, description, plan, completionReport };
+		const sections = parseSections(body);
+		return { meta, ...sections };
 	} catch {
 		return null;
 	}
 }
 
-function serializeTodoFile(todo: TodoFile): string {
-	const frontmatter = JSON.stringify(todo.meta, null, 2);
-	let body = "\n";
+/**
+ * Serialize todo content as pure markdown (new format)
+ */
+function serializeContent(todo: TodoFile): string {
+	let body = "";
 
 	if (todo.description) {
 		body += `## Description\n${todo.description}\n\n`;
@@ -141,20 +154,45 @@ function serializeTodoFile(todo: TodoFile): string {
 		body += `## Completion Report\n${todo.completionReport}\n\n`;
 	}
 
-	return `---\n${frontmatter}\n---\n${body}`;
+	return body.trim();
 }
 
 function readAllTodos(cwd: string): TodoFile[] {
 	const dir = getTodosDir(cwd);
 	if (!fs.existsSync(dir)) return [];
 
+	const seenIds = new Set<string>();
 	const todos: TodoFile[] = [];
+
+	// First scan for new format (.json files)
 	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-		if (!entry.name.endsWith(".md") || !entry.isFile()) continue;
+		if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+		if (entry.name.startsWith(".")) continue; // skip .disabled.json etc
 		try {
-			const content = fs.readFileSync(path.join(dir, entry.name), "utf-8");
-			const todo = parseTodoFile(content);
-			if (todo) todos.push(todo);
+			const id = entry.name.slice(0, -5); // remove .json
+			if (!/^\d+$/.test(id)) continue; // only numeric IDs
+			const todo = readTodo(cwd, id);
+			if (todo) {
+				todos.push(todo);
+				seenIds.add(id);
+			}
+		} catch {
+			continue;
+		}
+	}
+
+	// Then scan for old format (.md files without matching .json)
+	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+		if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+		if (entry.name.startsWith(".")) continue;
+		try {
+			const id = entry.name.slice(0, -3); // remove .md
+			if (seenIds.has(id)) continue; // already loaded as new format
+			const todo = readTodo(cwd, id);
+			if (todo) {
+				todos.push(todo);
+				seenIds.add(id);
+			}
 		} catch {
 			continue;
 		}
@@ -170,25 +208,77 @@ function readAllTodos(cwd: string): TodoFile[] {
 }
 
 function readTodo(cwd: string, id: string): TodoFile | null {
-	const filePath = path.join(getTodosDir(cwd), `${id}.md`);
-	if (!fs.existsSync(filePath)) return null;
-	try {
-		return parseTodoFile(fs.readFileSync(filePath, "utf-8"));
-	} catch {
-		return null;
+	const dir = getTodosDir(cwd);
+	const jsonPath = path.join(dir, `${id}.json`);
+	const mdPath = path.join(dir, `${id}.md`);
+
+	// Try new format first: separate .json and .md files
+	if (fs.existsSync(jsonPath)) {
+		try {
+			const metaContent = fs.readFileSync(jsonPath, "utf-8");
+			const meta = JSON.parse(metaContent) as TodoMeta;
+			let description = "";
+			let plan = "";
+			let completionReport = "";
+
+			if (fs.existsSync(mdPath)) {
+				const mdContent = fs.readFileSync(mdPath, "utf-8");
+				const sections = parseSections(mdContent);
+				description = sections.description;
+				plan = sections.plan;
+				completionReport = sections.completionReport;
+			}
+
+			return { meta, description, plan, completionReport };
+		} catch {
+			return null;
+		}
 	}
+
+	// Fall back to old format: .md with frontmatter
+	if (fs.existsSync(mdPath)) {
+		try {
+			const content = fs.readFileSync(mdPath, "utf-8");
+			return parseLegacyTodoFile(content);
+		} catch {
+			return null;
+		}
+	}
+
+	return null;
 }
 
 function writeTodo(cwd: string, todo: TodoFile): void {
 	const dir = ensureTodosDir(cwd);
-	fs.writeFileSync(path.join(dir, `${todo.meta.id}.md`), serializeTodoFile(todo), "utf-8");
+	// Always write new format: separate .json and .md files
+	fs.writeFileSync(
+		path.join(dir, `${todo.meta.id}.json`),
+		JSON.stringify(todo.meta, null, 2),
+		"utf-8",
+	);
+	fs.writeFileSync(
+		path.join(dir, `${todo.meta.id}.md`),
+		serializeContent(todo),
+		"utf-8",
+	);
 }
 
 function deleteTodoFile(cwd: string, id: string): boolean {
-	const filePath = path.join(getTodosDir(cwd), `${id}.md`);
-	if (!fs.existsSync(filePath)) return false;
-	fs.unlinkSync(filePath);
-	return true;
+	const dir = getTodosDir(cwd);
+	const jsonPath = path.join(dir, `${id}.json`);
+	const mdPath = path.join(dir, `${id}.md`);
+	let deleted = false;
+
+	if (fs.existsSync(jsonPath)) {
+		fs.unlinkSync(jsonPath);
+		deleted = true;
+	}
+	if (fs.existsSync(mdPath)) {
+		fs.unlinkSync(mdPath);
+		deleted = true;
+	}
+
+	return deleted;
 }
 
 /** Strip control characters from strings to prevent JSON frontmatter corruption */
@@ -197,12 +287,26 @@ function sanitizeString(s: string): string {
 }
 
 function nextId(cwd: string): string {
-	const todos = readAllTodos(cwd);
+	const dir = getTodosDir(cwd);
+	if (!fs.existsSync(dir)) return "001";
+
 	let max = 0;
-	for (const t of todos) {
-		const n = parseInt(t.meta.id, 10);
-		if (!isNaN(n) && n > max) max = n;
+	// Scan both .json and .md files for highest numeric ID
+	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+		if (!entry.isFile()) continue;
+		if (entry.name.startsWith(".")) continue;
+		let id: string | undefined;
+		if (entry.name.endsWith(".json")) {
+			id = entry.name.slice(0, -5);
+		} else if (entry.name.endsWith(".md")) {
+			id = entry.name.slice(0, -3);
+		}
+		if (id) {
+			const n = parseInt(id, 10);
+			if (!isNaN(n) && n > max) max = n;
+		}
 	}
+
 	return String(max + 1).padStart(3, "0");
 }
 
@@ -974,6 +1078,7 @@ export default function (pi: ExtensionAPI) {
 						},
 						description: params.description ?? "",
 						plan: resolvePlan(),
+						completionReport: "",
 					};
 					writeTodo(cwd, todo);
 					const planInfo = todo.plan ? " (with plan)" : "";
