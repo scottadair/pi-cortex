@@ -75,7 +75,9 @@ function parseTodoFile(content: string): TodoFile | null {
 	const match = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
 	if (!match) return null;
 	try {
-		const meta = JSON.parse(match[1]) as TodoMeta;
+		// Sanitize control characters that may have leaked into the JSON frontmatter
+		const sanitized = match[1].replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, " ");
+		const meta = JSON.parse(sanitized) as TodoMeta;
 		const body = match[2];
 
 		// Use indexOf for robust section extraction.
@@ -187,6 +189,11 @@ function deleteTodoFile(cwd: string, id: string): boolean {
 	if (!fs.existsSync(filePath)) return false;
 	fs.unlinkSync(filePath);
 	return true;
+}
+
+/** Strip control characters from strings to prevent JSON frontmatter corruption */
+function sanitizeString(s: string): string {
+	return s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, " ").replace(/\r\n?/g, "\n");
 }
 
 function nextId(cwd: string): string {
@@ -957,7 +964,7 @@ export default function (pi: ExtensionAPI) {
 					const todo: TodoFile = {
 						meta: {
 							id,
-							title: params.title,
+							title: sanitizeString(params.title),
 							status: params.status ?? "todo",
 							assignee: params.assignee,
 							priority: params.priority ?? "medium",
@@ -984,7 +991,7 @@ export default function (pi: ExtensionAPI) {
 					if (!existing) {
 						return { content: [{ type: "text", text: `Todo #${params.id} not found` }], details: {} };
 					}
-					if (params.title !== undefined) existing.meta.title = params.title;
+					if (params.title !== undefined) existing.meta.title = sanitizeString(params.title);
 					if (params.status !== undefined) existing.meta.status = params.status;
 					if (params.assignee !== undefined) existing.meta.assignee = params.assignee;
 					if (params.priority !== undefined) existing.meta.priority = params.priority;
