@@ -144,7 +144,7 @@ function createAgentOverride(cwd: string, agent: AgentConfig): AgentConfig {
 
 function updateAgentFrontmatter(
 	agent: AgentConfig,
-	updates: { model?: string; tools?: string[]; thinking?: string }
+	updates: { model?: string; tools?: string[]; thinking?: string; provider?: string }
 ): void {
 	try {
 		const content = fs.readFileSync(agent.filePath, "utf-8");
@@ -163,6 +163,14 @@ function updateAgentFrontmatter(
 				delete frontmatter.thinking;
 			} else {
 				frontmatter.thinking = updates.thinking;
+			}
+		}
+
+		if (updates.provider !== undefined) {
+			if (updates.provider === "") {
+				delete frontmatter.provider;
+			} else {
+				frontmatter.provider = updates.provider;
 			}
 		}
 		
@@ -1506,6 +1514,7 @@ export default function (pi: ExtensionAPI) {
 		private headerText: Text;
 		private hintText: Text;
 		private disabledCount = 0;
+		public projectProviderDefault?: string;
 
 		private _focused = false;
 		get focused(): boolean {
@@ -1662,12 +1671,21 @@ export default function (pi: ExtensionAPI) {
 				const toolsText = agent.tools ? this.theme.fg("dim", ` {${agent.tools.length} tools}`) : "";
 				const thinkingText = agent.thinking ? this.theme.fg("dim", " ~" + agent.thinking) : "";
 
+				// Show provider: agent-specific in muted, inherited default in dim
+				let providerText = "";
+				if (agent.provider) {
+					providerText = this.theme.fg("muted", ` @${agent.provider}`);
+				} else if (this.projectProviderDefault) {
+					providerText = this.theme.fg("dim", ` @${this.projectProviderDefault}`);
+				}
+
 				const line =
 					prefix +
 					this.theme.fg(sourceColor, sourceLabel) +
 					" " +
 					this.theme.fg(nameColor, agent.name) +
 					modelText +
+					providerText +
 					toolsText +
 					thinkingText;
 
@@ -1745,6 +1763,7 @@ export default function (pi: ExtensionAPI) {
 			const options: SelectItem[] = [
 				...(isTmuxAvailable() ? [{ value: "edit", label: "edit", description: "Edit in vim (tmux)" }] : []),
 				{ value: "model", label: "model", description: "Change model" },
+				{ value: "provider", label: "provider", description: "Set provider" },
 				{ value: "tools", label: "tools", description: "Configure tools" },
 				{ value: "thinking", label: "thinking", description: "Set thinking level" },
 				{ value: "copyPath", label: "copy path", description: "Copy file path to clipboard" },
@@ -2324,6 +2343,47 @@ export default function (pi: ExtensionAPI) {
 						return;
 					}
 
+					if (action === "provider") {
+						const targetAgent = ensureProjectAgent(agent);
+						// Read available providers from .cortex/providers.json
+						const providerDefaults = getProjectProviderDefaults(cwd);
+						let providerAccounts: string[] = [];
+						try {
+							const globalPath = path.join(os.homedir(), ".cortex", "providers.json");
+							const projectPath = path.join(cwd, ".cortex", "providers.json");
+							for (const p of [globalPath, projectPath]) {
+								if (fs.existsSync(p)) {
+									const cfg = JSON.parse(fs.readFileSync(p, "utf-8"));
+									if (cfg.accounts) providerAccounts.push(...Object.keys(cfg.accounts));
+								}
+							}
+						} catch { /* ignore */ }
+						providerAccounts = [...new Set(providerAccounts)];
+
+						const options: string[] = [
+							`Use project default${providerDefaults.agents ? ` (${providerDefaults.agents})` : ""}`,
+							...providerAccounts,
+						];
+
+						const choice = await ctx.ui.select(
+							`Provider for ${targetAgent.name}${targetAgent.provider ? ` (current: ${targetAgent.provider})` : ""}`,
+							options,
+						);
+
+						if (choice != null) {
+							if (choice.startsWith("Use project default")) {
+								updateAgentFrontmatter(targetAgent, { provider: "" });
+								ctx.ui.notify(`Cleared provider for ${targetAgent.name} (using project default)`, "info");
+							} else {
+								updateAgentFrontmatter(targetAgent, { provider: choice });
+								ctx.ui.notify(`Set provider for ${targetAgent.name} to '${choice}'`, "info");
+							}
+							refreshAgents();
+						}
+						setActiveComponent(selector);
+						return;
+					}
+
 					if (action === "copyPath") {
 						copyAgentPathToClipboard(agent);
 						setActiveComponent(selector);
@@ -2458,6 +2518,7 @@ export default function (pi: ExtensionAPI) {
 					() => done(),
 					handleQuickAction,
 				);
+				selector.projectProviderDefault = getProjectProviderDefaults(cwd).agents;
 
 				setActiveComponent(selector);
 
