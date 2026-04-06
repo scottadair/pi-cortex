@@ -22,7 +22,9 @@ import {
 	type Component,
 	Key,
 	matchesKey,
+	truncateToWidth,
 	type TUI,
+	visibleWidth,
 } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -639,6 +641,231 @@ async function handleSwitch(
 }
 
 // ---------------------------------------------------------------------------
+// Remove by name (targeted, no picker)
+// ---------------------------------------------------------------------------
+
+async function handleRemoveByName(
+	ctx: any,
+	name: string,
+	currentConfig: ProvidersConfig,
+	doLoad: () => any,
+): Promise<void> {
+	const account = currentConfig.accounts[name];
+	if (!account) return;
+
+	const sourceFile = accountSources.get(name);
+	const scope = sourceFile?.includes(os.homedir()) ? "global" : "project";
+	const confirmed = await ctx.ui.confirm(
+		`Remove '${name}'?`,
+		`Provider: ${account.provider} | Scope: ${scope}`,
+	);
+	if (!confirmed) return;
+
+	if (sourceFile) {
+		removeAccountFromFile(sourceFile, name);
+		doLoad();
+		ctx.ui.notify(`✓ Removed '${name}'`, "info");
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Account action menu
+// ---------------------------------------------------------------------------
+
+async function handleAccountActions(
+	ctx: any,
+	accountName: string,
+	currentConfig: ProvidersConfig,
+	cwd: string,
+	doLoad: () => any,
+): Promise<void> {
+	const account = currentConfig.accounts[accountName];
+	if (!account) return;
+
+	const isDefault = currentConfig.defaults?.agents === accountName;
+	const actions = [
+		isDefault ? "✓ Default provider (current)" : "Set as default provider",
+		"Remove account",
+	];
+
+	const choice = await ctx.ui.select(`Account: ${accountName}`, actions);
+	if (!choice) return;
+
+	if (choice.includes("default") || choice.includes("Default")) {
+		if (!isDefault) {
+			const projectPath = getProjectConfigPath(cwd);
+			const existing = readConfigFile(projectPath) || { accounts: {} };
+			existing.defaults = existing.defaults || {};
+			existing.defaults.agents = accountName;
+			safeWriteProjectConfig(projectPath, existing);
+			doLoad();
+			ctx.ui.notify(`✓ Default provider set to '${accountName}'`, "info");
+		}
+	} else if (choice.includes("Remove")) {
+		await handleRemoveByName(ctx, accountName, currentConfig, doLoad);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Provider overlay TUI component
+// ---------------------------------------------------------------------------
+
+interface OverlayAccount {
+	name: string;
+	config: AccountConfig;
+	registered: boolean;
+	scope: string;
+}
+
+class ProviderOverlayComponent implements Component {
+	private accounts: OverlayAccount[];
+	private defaults: ProvidersConfig["defaults"];
+	private selectedIndex: number = 0;
+	private tui: TUI;
+	private onDone: (action: string | null) => void;
+	private cachedLines?: string[];
+	private cachedWidth?: number;
+
+	private dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+	private bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+	private cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
+	private green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+	private yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
+	private red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+
+	constructor(
+		tui: TUI,
+		_theme: any,
+		accounts: OverlayAccount[],
+		defaults: ProvidersConfig["defaults"],
+		onDone: (action: string | null) => void,
+	) {
+		this.tui = tui;
+		this.accounts = accounts;
+		this.defaults = defaults;
+		this.onDone = onDone;
+	}
+
+	invalidate(): void {
+		this.cachedLines = undefined;
+		this.cachedWidth = undefined;
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			this.onDone("close");
+			return;
+		}
+		if (matchesKey(data, Key.up)) {
+			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			this.selectedIndex = Math.min(this.accounts.length - 1, this.selectedIndex + 1);
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			const acct = this.accounts[this.selectedIndex];
+			if (acct) this.onDone(`actions:${acct.name}`);
+			return;
+		}
+		if (data === "a") { this.onDone("add"); return; }
+		if (data === "d") { this.onDone("default"); return; }
+		if (data === "m") { this.onDone("model"); return; }
+		if (data === "s") { this.onDone("switch"); return; }
+		if (data === "r") {
+			const acct = this.accounts[this.selectedIndex];
+			if (acct) this.onDone(`remove:${acct.name}`);
+			return;
+		}
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+
+		const boxWidth = Math.min(width - 2, 80);
+		const innerWidth = boxWidth - 4; // 2 border + 2 padding
+
+		const h = this.dim("\u2500");
+		const v = this.dim("\u2502");
+		const tl = this.dim("\u256d");
+		const tr = this.dim("\u256e");
+		const bl = this.dim("\u2570");
+		const br = this.dim("\u256f");
+		const sep_l = this.dim("\u251c");
+		const sep_r = this.dim("\u2524");
+
+		const padLine = (content: string): string => {
+			const vis = visibleWidth(content);
+			const pad = Math.max(0, innerWidth - vis);
+			return v + " " + content + " ".repeat(pad) + " " + v;
+		};
+		const emptyLine = (): string => v + " ".repeat(boxWidth - 2) + v;
+		const sepLine = (): string => sep_l + h.repeat(boxWidth - 2) + sep_r;
+
+		const lines: string[] = [];
+
+		// Title
+		const title = ` Providers (${this.accounts.length} accounts) `;
+		const titlePrefix = h.repeat(2);
+		const titleVis = 2 + visibleWidth(title);
+		const titlePad = Math.max(0, boxWidth - 2 - titleVis);
+		lines.push(tl + titlePrefix + this.bold(this.cyan(title)) + h.repeat(titlePad) + tr);
+
+		// Defaults
+		lines.push(emptyLine());
+		const defProvider = this.defaults?.agents || this.dim("not set");
+		const defModel = this.defaults?.model || this.dim("not set");
+		lines.push(padLine(
+			`${this.bold("Provider:")} ${this.cyan(defProvider)}  ${this.bold("Model:")} ${this.cyan(defModel)}`
+		));
+		lines.push(sepLine());
+
+		// Account list
+		if (this.accounts.length === 0) {
+			lines.push(emptyLine());
+			lines.push(padLine(this.dim("No accounts configured. Press ") + this.cyan("a") + this.dim(" to add one.")));
+			lines.push(emptyLine());
+		} else {
+			lines.push(emptyLine());
+			for (let i = 0; i < this.accounts.length; i++) {
+				const acct = this.accounts[i];
+				const isSelected = i === this.selectedIndex;
+				const isDefault = this.defaults?.agents === acct.name;
+
+				const pointer = isSelected ? this.cyan("▶ ") : "  ";
+				const status = acct.registered ? this.green("✓") : this.red("✗");
+				const nameStr = isSelected ? this.cyan(acct.name) : acct.name;
+				const providerStr = this.dim(acct.config.provider);
+				const authStr = this.dim(acct.config.auth === "subscription" ? "sub" : "key");
+				const scopeStr = this.dim(acct.scope);
+				const defaultTag = isDefault ? this.yellow(" ★") : "";
+
+				const row = `${pointer}${status} ${nameStr}  ${providerStr}  ${authStr}  ${scopeStr}${defaultTag}`;
+				lines.push(padLine(truncateToWidth(row, innerWidth)));
+			}
+			lines.push(emptyLine());
+		}
+
+		// Hints
+		lines.push(sepLine());
+		const hints1 = `${this.dim("a")} add  ${this.dim("d")} default  ${this.dim("m")} model  ${this.dim("r")} remove`;
+		const hints2 = `${this.dim("Enter")} actions  ${this.dim("s")} switch  ${this.dim("Esc")} close`;
+		lines.push(padLine(hints1));
+		lines.push(padLine(hints2));
+		lines.push(bl + h.repeat(boxWidth - 2) + br);
+
+		this.cachedLines = lines;
+		this.cachedWidth = width;
+		return lines;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Provider registration
 // ---------------------------------------------------------------------------
 
@@ -764,61 +991,67 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// ── List ─────────────────────────────────────────────
+			// ── List (interactive overlay) ─────────────────────────────
 			if (subcommand === "list" || subcommand === "") {
-				const lines: string[] = [];
-				lines.push("# Configured Providers\n");
-
-				const accountEntries = Object.entries(currentConfig.accounts);
-				if (accountEntries.length === 0) {
-					lines.push("No accounts configured.\n");
-					lines.push("Run `/providers add` to set up your first provider account.");
-				} else {
-					for (const [name, account] of accountEntries) {
-						const isRegistered = lastRegistered.includes(name);
-						const status = isRegistered ? "✓" : "✗";
-						const authType = account.auth === "subscription" ? "subscription" : "api-key";
-						const baseUrl = account.baseUrl || KNOWN_PROVIDERS[account.provider]?.baseUrl || "unknown";
-						const source = accountSources.get(name);
-						const scope = source?.includes(os.homedir()) ? "global" : "project";
-
-						lines.push(`- **${status} ${name}** (${scope})`);
-						lines.push(`  - Provider: ${account.provider}`);
-						lines.push(`  - Auth: ${authType}`);
-						lines.push(`  - URL: ${baseUrl}`);
-						if (account.api) lines.push(`  - API: ${account.api}`);
-						lines.push("");
+				if (!ctx.hasUI) {
+					// Non-interactive text fallback
+					const lines: string[] = ["# Configured Providers\n"];
+					const entries = Object.entries(currentConfig.accounts);
+					if (entries.length === 0) {
+						lines.push("No accounts configured. Run `/providers add`.");
+					} else {
+						for (const [name, account] of entries) {
+							const status = lastRegistered.includes(name) ? "✓" : "✗";
+							lines.push(`- ${status} ${name} (${account.provider})`);
+						}
 					}
+					ctx.ui.notify(lines.join("\n"), "info");
+					return;
 				}
 
-				if (currentConfig.defaults?.agents || currentConfig.defaults?.interactive || currentConfig.defaults?.model) {
-					lines.push("## Defaults\n");
-					if (currentConfig.defaults.agents) {
-						lines.push(`- Agents: **${currentConfig.defaults.agents}**`);
+				// Interactive overlay with action loop
+				let action: string | null = "open";
+				while (action && action !== "close") {
+					// Refresh data
+					const accounts: OverlayAccount[] = Object.entries(currentConfig.accounts).map(
+						([name, config]) => ({
+							name,
+							config,
+							registered: lastRegistered.includes(name),
+							scope: accountSources.get(name)?.includes(os.homedir()) ? "global" : "project",
+						}),
+					);
+
+					action = await (ctx.ui.custom as any)(
+						(tui: any, theme: any, _kb: any, done: (r: string | null) => void) => {
+							return new ProviderOverlayComponent(
+								tui, theme, accounts, currentConfig.defaults, done,
+							);
+						},
+					);
+
+					if (!action || action === "close") break;
+
+					if (action === "add") {
+						await handleAdd(ctx, currentConfig, cwd, doLoad);
+					} else if (action === "default") {
+						await handleDefault(ctx, currentConfig, lastRegistered, cwd, doLoad);
+					} else if (action === "model") {
+						await handleModel(ctx, currentConfig, cwd, doLoad);
+					} else if (action === "switch") {
+						await handleSwitch(ctx, currentConfig, lastRegistered);
+					} else if (action.startsWith("remove:")) {
+						const name = action.slice("remove:".length);
+						await handleRemoveByName(ctx, name, currentConfig, doLoad);
+					} else if (action.startsWith("actions:")) {
+						const name = action.slice("actions:".length);
+						await handleAccountActions(ctx, name, currentConfig, cwd, doLoad);
 					}
-					if (currentConfig.defaults.interactive) {
-						lines.push(`- Interactive: **${currentConfig.defaults.interactive}**`);
-					}
-					if (currentConfig.defaults.model) {
-						lines.push(`- Model: **${currentConfig.defaults.model}**`);
-					}
-					lines.push("");
+
+					// Reload after any action
+					doLoad();
+					action = "open"; // reopen overlay
 				}
-
-				const globalPath = getGlobalConfigPath();
-				const projectPath = getProjectConfigPath(cwd);
-				lines.push("## Config files\n");
-				lines.push(`- Global: \`${globalPath}\` ${fs.existsSync(globalPath) ? "(found)" : "(not found)"}`);
-				lines.push(`- Project: \`${projectPath}\` ${fs.existsSync(projectPath) ? "(found)" : "(not found)"}`);
-
-				if (lastErrors.length > 0) {
-					lines.push("\n## Errors\n");
-					for (const err of lastErrors) {
-						lines.push(`- ⚠ ${err}`);
-					}
-				}
-
-				ctx.ui.notify(lines.join("\n"), "info");
 				return;
 			}
 
