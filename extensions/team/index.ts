@@ -681,6 +681,41 @@ class AgentWidgetManager {
 	}
 }
 
+const JSON_ERROR_PATTERNS = [
+	'Unexpected non-whitespace character after JSON',
+	'Bad control character in string literal in JSON',
+	'Unterminated string in JSON',
+	'Expected property name or \'}\'',
+];
+
+function containsJsonError(text: string): boolean {
+	for (const pattern of JSON_ERROR_PATTERNS) {
+		if (text.includes(pattern)) return true;
+	}
+	if (text.includes('Unexpected token') && text.includes('JSON')) return true;
+	return false;
+}
+
+function isJsonParseError(result: SingleResult): boolean {
+	// Check stderr
+	if (containsJsonError(result.stderr)) return true;
+
+	// Check toolResult messages
+	for (const msg of result.messages) {
+		if (msg.role !== 'toolResult') continue;
+		
+		if (typeof msg.content === 'string') {
+			if (containsJsonError(msg.content)) return true;
+		} else if (Array.isArray(msg.content)) {
+			for (const part of msg.content) {
+				if (part.type === 'text' && containsJsonError(part.text)) return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 async function runSingleAgent(
 	defaultCwd: string,
 	agents: AgentConfig[],
@@ -753,107 +788,143 @@ async function runSingleAgent(
 
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
+		let buffer = "";
 
-		const exitCode = await new Promise<number>((resolve) => {
-			const invocation = getPiInvocation(args);
-			const proc = spawn(invocation.command, invocation.args, {
-				cwd: defaultCwd,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			activeProcesses.add(proc);
-			let buffer = "";
+		const MAX_JSON_RETRIES = 2;
+		let jsonRetryCount = 0;
 
-			const processLine = (line: string) => {
-				if (!line.trim()) return;
-				let event: any;
-				try {
-					event = JSON.parse(line);
-				} catch {
-					return;
-				}
+		while (true) {
+			// Reset state for retry
+			wasAborted = false;
+			buffer = "";
 
-				if (event.type === "message_end" && event.message) {
-					const msg = event.message as Message;
-					currentResult.messages.push(msg);
+			const exitCode = await new Promise<number>((resolve) => {
+				const invocation = getPiInvocation(args);
+				const proc = spawn(invocation.command, invocation.args, {
+					cwd: defaultCwd,
+					shell: false,
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				activeProcesses.add(proc);
 
-					if (msg.role === "assistant") {
-						currentResult.usage.turns++;
-						const usage = msg.usage;
-						if (usage) {
-							currentResult.usage.input += usage.input || 0;
-							currentResult.usage.output += usage.output || 0;
-							currentResult.usage.cacheRead += usage.cacheRead || 0;
-							currentResult.usage.cacheWrite += usage.cacheWrite || 0;
-							currentResult.usage.cost += usage.cost?.total || 0;
-							currentResult.usage.contextTokens = usage.totalTokens || 0;
-						}
-						if (!currentResult.model && msg.model) currentResult.model = msg.model;
-						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
-						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+				const processLine = (line: string) => {
+					if (!line.trim()) return;
+					let event: any;
+					try {
+						event = JSON.parse(line);
+					} catch {
+						return;
 					}
 
-					if (widget && msg.role === "assistant") {
-						const content = (msg.content ?? []) as Array<Record<string, any>>;
-						let lastTool: string | undefined;
-						for (const part of content) {
-							if (part.type === "toolCall") {
-								lastTool = `${part.name} ${summarizeToolArgs(part.arguments ?? {})}`;
+					if (event.type === "message_end" && event.message) {
+						const msg = event.message as Message;
+						currentResult.messages.push(msg);
+
+						if (msg.role === "assistant") {
+							currentResult.usage.turns++;
+							const usage = msg.usage;
+							if (usage) {
+								currentResult.usage.input += usage.input || 0;
+								currentResult.usage.output += usage.output || 0;
+								currentResult.usage.cacheRead += usage.cacheRead || 0;
+								currentResult.usage.cacheWrite += usage.cacheWrite || 0;
+								currentResult.usage.cost += usage.cost?.total || 0;
+								currentResult.usage.contextTokens = usage.totalTokens || 0;
 							}
+							if (!currentResult.model && msg.model) currentResult.model = msg.model;
+							if (msg.stopReason) currentResult.stopReason = msg.stopReason;
+							if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 						}
-						widget.update(agentId, {
-							turns: currentResult.usage.turns,
-							cost: currentResult.usage.cost,
-							...(lastTool ? { lastTool } : {}),
-						});
+
+						if (widget && msg.role === "assistant") {
+							const content = (msg.content ?? []) as Array<Record<string, any>>;
+							let lastTool: string | undefined;
+							for (const part of content) {
+								if (part.type === "toolCall") {
+									lastTool = `${part.name} ${summarizeToolArgs(part.arguments ?? {})}`;
+								}
+							}
+							widget.update(agentId, {
+								turns: currentResult.usage.turns,
+								cost: currentResult.usage.cost,
+								...(lastTool ? { lastTool } : {}),
+							});
+						}
+
+						emitUpdate();
 					}
 
-					emitUpdate();
-				}
-
-				if (event.type === "tool_result_end" && event.message) {
-					currentResult.messages.push(event.message as Message);
-					emitUpdate();
-				}
-			};
-
-			proc.stdout.on("data", (data: Buffer) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(line);
-			});
-
-			proc.stderr.on("data", (data: Buffer) => {
-				currentResult.stderr += data.toString();
-			});
-
-			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(buffer);
-				activeProcesses.delete(proc);
-				resolve(code ?? 0);
-			});
-
-			proc.on("error", () => {
-				activeProcesses.delete(proc);
-				resolve(1);
-			});
-
-			if (signal) {
-				const killProc = () => {
-					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
+					if (event.type === "tool_result_end" && event.message) {
+						currentResult.messages.push(event.message as Message);
+						emitUpdate();
+					}
 				};
-				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
-			}
-		});
 
-		currentResult.exitCode = exitCode;
-		if (wasAborted) throw new Error("Agent was aborted");
+				proc.stdout.on("data", (data: Buffer) => {
+					buffer += data.toString();
+					const lines = buffer.split("\n");
+					buffer = lines.pop() || "";
+					for (const line of lines) processLine(line);
+				});
+
+				proc.stderr.on("data", (data: Buffer) => {
+					currentResult.stderr += data.toString();
+				});
+
+				proc.on("close", (code) => {
+					if (buffer.trim()) processLine(buffer);
+					activeProcesses.delete(proc);
+					resolve(code ?? 0);
+				});
+
+				proc.on("error", () => {
+					activeProcesses.delete(proc);
+					resolve(1);
+				});
+
+				if (signal) {
+					const killProc = () => {
+						wasAborted = true;
+						proc.kill("SIGTERM");
+						setTimeout(() => {
+							if (!proc.killed) proc.kill("SIGKILL");
+						}, 5000);
+					};
+					if (signal.aborted) killProc();
+					else signal.addEventListener("abort", killProc, { once: true });
+				}
+			});
+
+			currentResult.exitCode = exitCode;
+			if (wasAborted) throw new Error("Agent was aborted");
+
+			// Check for JSON parse error and retry
+			if (currentResult.exitCode !== 0 && isJsonParseError(currentResult) && jsonRetryCount < MAX_JSON_RETRIES) {
+				jsonRetryCount++;
+				// Accumulate costs before reset
+				const prevCost = currentResult.usage.cost;
+				const prevInput = currentResult.usage.input;
+				const prevOutput = currentResult.usage.output;
+				const prevCacheRead = currentResult.usage.cacheRead;
+				const prevCacheWrite = currentResult.usage.cacheWrite;
+				// Reset for retry
+				currentResult.messages = [];
+				currentResult.stderr = "";
+				currentResult.usage = {
+					input: prevInput,
+					output: prevOutput,
+					cacheRead: prevCacheRead,
+					cacheWrite: prevCacheWrite,
+					cost: prevCost,
+					contextTokens: 0,
+					turns: 0,
+				};
+				currentResult.stopReason = undefined;
+				currentResult.errorMessage = undefined;
+				continue;
+			}
+			break;
+		}
 
 		if (widget) {
 			widget.complete(agentId, currentResult.exitCode === 0);
