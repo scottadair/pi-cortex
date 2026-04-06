@@ -988,9 +988,12 @@ class TodoDetailOverlayComponent {
 function buildRefinePrompt(id: string, title: string): string {
 	return (
 		`Let's refine task #${id} "${title}": ` +
-		"Ask me for the missing details needed to build a solid description and a full implementation plan. " +
-		"Do not rewrite the todo yet and do not make assumptions. " +
-		"Ask clear, concrete questions and wait for my answers before writing the plan document.\n\n"
+		"First, use the team tool to have the architect scout the codebase and analyze this task. " +
+		"The architect should explore relevant code, understand the current architecture, identify the files and patterns involved, " +
+		"and draft initial findings about how this task could be implemented. " +
+		"Then, based on the architect's analysis, ask me ONLY the questions that couldn't be answered from the code — " +
+		"things like product decisions, desired behavior, priorities, or ambiguous requirements. " +
+		"Do not rewrite the todo yet. Wait for my answers before writing the plan document.\n\n"
 	);
 }
 
@@ -1000,7 +1003,7 @@ function buildRefinePrompt(id: string, title: string): string {
 
 const TodoParams = Type.Object({
 	action: StringEnum(["create", "update", "list", "get", "set-description", "set-plan", "delete", "refine"] as const, {
-		description: "Action to perform. Use 'refine' when the user wants to refine, flesh out, or improve a todo's description and plan — this triggers the interactive Q&A workflow.",
+		description: "Action to perform. Use 'refine' when the user wants to refine, flesh out, or improve a todo's description and plan — this delegates to the architect to scout the codebase first, then asks the user only remaining questions via Q&A.",
 	}),
 	id: Type.Optional(Type.String({ description: "Todo ID (required for most actions except create, list)" })),
 	title: Type.Optional(Type.String({ description: "Todo title (for create, update)" })),
@@ -1036,7 +1039,7 @@ export default function (pi: ExtensionAPI) {
 			"list (filter_status?, filter_assignee?), get (id),",
 			"set-description (id, description) - replace the description,",
 			"set-plan (id, plan or plan_file) - replace the full plan document,",
-			"delete (id), refine (id) - ask user clarifying questions to build description and plan.",
+			"delete (id), refine (id) - delegates to architect to scout codebase, then asks user remaining questions to build description and plan.",
 			"Status: todo, in-progress, done, blocked. Priority: low, medium, high.",
 			"Assignees are team member names: team-lead, dev-backend, dev-frontend, architect, qa.",
 		].join(" "),
@@ -1209,8 +1212,12 @@ export default function (pi: ExtensionAPI) {
 					if (todo.meta.tags?.length) context += `**Tags**: ${todo.meta.tags.join(", ")}\n`;
 					if (todo.description) context += `\n**Current description**:\n${todo.description}\n`;
 					if (todo.plan) context += `\n**Current plan**:\n${todo.plan}\n`;
-					context += `\nAsk the user clarifying questions to build a comprehensive description and a full implementation plan for this task. `;
-					context += `Do not make assumptions. Ask clear, concrete questions and wait for answers. `;
+					context += `\nFirst, use the team tool to delegate to the architect to scout the codebase and analyze this task. `;
+					context += `The architect should explore relevant code, understand the current architecture, identify files and patterns involved, `;
+					context += `and produce initial findings about how this task could be implemented. `;
+					context += `Then, based on the architect's analysis, ask the user ONLY the questions that could not be answered from the code — `;
+					context += `product decisions, desired behavior, priorities, or ambiguous requirements. `;
+					context += `Do not make assumptions about those. Ask clear, concrete questions and wait for answers. `;
 					context += `After getting answers, use "set-description" for the description and "set-plan" for the plan. `;
 					context += `The plan should be a full document with: Context (why this change), Changes (numbered sections with specific files, line numbers, code), Files to modify, and Verification (how to test).`;
 					return {
