@@ -15,6 +15,7 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { getActiveProviderAccount } from "../providers/state.js";
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -95,7 +96,7 @@ export default function (pi: ExtensionAPI) {
 					const rightSegments: Segment[] = [];
 
 					// Left: provider
-					const providerName = ctx.model?.provider || "";
+					const providerName = getActiveProviderAccount() || ctx.model?.provider || "";
 					if (providerName) {
 						leftSegments.push({
 							content: "⚡ " + theme.fg("dim", providerName),

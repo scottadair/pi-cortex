@@ -31,6 +31,7 @@ import {
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { setActiveProviderAccount } from "./state.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -554,6 +555,19 @@ async function handleRemove(ctx: any, currentConfig: ProvidersConfig, doLoad: ()
 }
 
 // ---------------------------------------------------------------------------
+// Helper: all available provider names (cortex-managed + built-in pi providers)
+// ---------------------------------------------------------------------------
+
+function getAllProviderNames(lastRegistered: string[], ctx: any): string[] {
+	const names = new Set(lastRegistered);
+	const allModels = ctx.modelRegistry?.getAvailable?.() ?? [];
+	for (const m of allModels) {
+		if (m.provider) names.add(m.provider);
+	}
+	return Array.from(names);
+}
+
+// ---------------------------------------------------------------------------
 // Default provider handler
 // ---------------------------------------------------------------------------
 
@@ -564,13 +578,14 @@ async function handleDefault(
 	cwd: string,
 	doLoad: () => any,
 ): Promise<void> {
-	if (lastRegistered.length === 0) {
+	const allProviders = getAllProviderNames(lastRegistered, ctx);
+	if (allProviders.length === 0) {
 		ctx.ui.notify("No providers configured. Run `/providers add` first.", "info");
 		return;
 	}
 
 	const current = currentConfig.defaults?.agents;
-	const labels = lastRegistered.map((name) =>
+	const labels = allProviders.map((name) =>
 		name === current ? `${name}  (current)` : name,
 	);
 
@@ -645,13 +660,14 @@ async function handleSwitch(
 	currentConfig: ProvidersConfig,
 	lastRegistered: string[],
 ): Promise<void> {
-	if (lastRegistered.length === 0) {
+	const allProviders = getAllProviderNames(lastRegistered, ctx);
+	if (allProviders.length === 0) {
 		ctx.ui.notify("No providers configured. Run `/providers add` first.", "info");
 		return;
 	}
 
 	const current = currentConfig.defaults?.agents;
-	const labels = lastRegistered.map((name) =>
+	const labels = allProviders.map((name) =>
 		name === current ? `${name}  (current)` : name,
 	);
 
@@ -661,6 +677,7 @@ async function handleSwitch(
 	const selected = choice.split("  ")[0].trim();
 	currentConfig.defaults = currentConfig.defaults || {};
 	currentConfig.defaults.agents = selected;
+	setActiveProviderAccount(selected);
 	ctx.ui.notify(`Switched to '${selected}' for this session. Use \`/providers default\` to persist.`, "info");
 }
 
@@ -739,6 +756,7 @@ interface OverlayAccount {
 	config: AccountConfig;
 	registered: boolean;
 	scope: string;
+	builtIn?: boolean;
 }
 
 class ProviderOverlayComponent implements Component {
@@ -794,7 +812,7 @@ class ProviderOverlayComponent implements Component {
 		}
 		if (matchesKey(data, Key.enter)) {
 			const acct = this.accounts[this.selectedIndex];
-			if (acct) this.onDone(`actions:${acct.name}`);
+			if (acct && !acct.builtIn) this.onDone(`actions:${acct.name}`);
 			return;
 		}
 		if (data === "a") { this.onDone("add"); return; }
@@ -803,7 +821,7 @@ class ProviderOverlayComponent implements Component {
 		if (data === "s") { this.onDone("switch"); return; }
 		if (data === "r") {
 			const acct = this.accounts[this.selectedIndex];
-			if (acct) this.onDone(`remove:${acct.name}`);
+			if (acct && !acct.builtIn) this.onDone(`remove:${acct.name}`);
 			return;
 		}
 	}
@@ -866,7 +884,7 @@ class ProviderOverlayComponent implements Component {
 				const nameStr = isSelected ? this.cyan(acct.name) : acct.name;
 				const providerStr = this.dim(acct.config.provider);
 				const authStr = this.dim(acct.config.auth === "subscription" ? "sub" : "key");
-				const scopeStr = this.dim(acct.scope);
+				const scopeStr = this.dim(acct.builtIn ? "built-in" : acct.scope);
 				const defaultTag = isDefault ? this.yellow(" ★") : "";
 
 				const row = `${pointer}${status} ${nameStr}  ${providerStr}  ${authStr}  ${scopeStr}${defaultTag}`;
@@ -953,6 +971,10 @@ export default function (pi: ExtensionAPI) {
 		const result = registerAccounts(pi, currentConfig);
 		lastRegistered = result.registered;
 		lastErrors = result.errors;
+
+		// Update shared state so footer can display the active account name
+		setActiveProviderAccount(currentConfig.defaults?.agents ?? null);
+
 		return result;
 	};
 
@@ -1021,13 +1043,22 @@ export default function (pi: ExtensionAPI) {
 					// Non-interactive text fallback
 					const lines: string[] = ["# Configured Providers\n"];
 					const entries = Object.entries(currentConfig.accounts);
-					if (entries.length === 0) {
+					for (const [name, account] of entries) {
+						const status = lastRegistered.includes(name) ? "✓" : "✗";
+						lines.push(`- ${status} ${name} (${account.provider})`);
+					}
+					// Include built-in pi providers
+					const cortexNames = new Set(Object.keys(currentConfig.accounts));
+					const allModels = ctx.modelRegistry?.getAvailable?.() ?? [];
+					const builtInProviders = new Set<string>();
+					for (const m of allModels) {
+						if (m.provider && !cortexNames.has(m.provider)) builtInProviders.add(m.provider);
+					}
+					for (const name of builtInProviders) {
+						lines.push(`- ✓ ${name} (built-in)`);
+					}
+					if (entries.length === 0 && builtInProviders.size === 0) {
 						lines.push("No accounts configured. Run `/providers add`.");
-					} else {
-						for (const [name, account] of entries) {
-							const status = lastRegistered.includes(name) ? "✓" : "✗";
-							lines.push(`- ${status} ${name} (${account.provider})`);
-						}
 					}
 					ctx.ui.notify(lines.join("\n"), "info");
 					return;
@@ -1036,7 +1067,7 @@ export default function (pi: ExtensionAPI) {
 				// Interactive overlay with action loop
 				let action: string | null = "open";
 				while (action && action !== "close") {
-					// Refresh data
+					// Refresh data — cortex-managed accounts
 					const accounts: OverlayAccount[] = Object.entries(currentConfig.accounts).map(
 						([name, config]) => ({
 							name,
@@ -1045,6 +1076,25 @@ export default function (pi: ExtensionAPI) {
 							scope: accountSources.get(name)?.includes(os.homedir()) ? "global" : "project",
 						}),
 					);
+
+					// Discover built-in pi providers not managed by cortex
+					const cortexNames = new Set(Object.keys(currentConfig.accounts));
+					const allModels = ctx.modelRegistry?.getAvailable?.() ?? [];
+					const builtInProviders = new Set<string>();
+					for (const m of allModels) {
+						if (m.provider && !cortexNames.has(m.provider)) {
+							builtInProviders.add(m.provider);
+						}
+					}
+					for (const providerName of builtInProviders) {
+						accounts.push({
+							name: providerName,
+							config: { provider: providerName },
+							registered: true,
+							scope: "built-in",
+							builtIn: true,
+						});
+					}
 
 					action = await (ctx.ui.custom as any)(
 						(tui: any, theme: any, _kb: any, done: (r: string | null) => void) => {
