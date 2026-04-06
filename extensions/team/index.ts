@@ -273,6 +273,7 @@ function createAgentFromTemplate(cwd: string, name: string, templatePath: string
 			description: frontmatter.description || "",
 			tools: tools && tools.length > 0 ? tools : undefined,
 			model: frontmatter.model,
+			provider: frontmatter.provider,
 			thinking: frontmatter.thinking,
 			systemPrompt: body,
 			source: "project",
@@ -293,6 +294,7 @@ interface AgentConfig {
 	description: string;
 	tools?: string[];
 	model?: string;
+	provider?: string;
 	thinking?: string;
 	systemPrompt: string;
 	source: "package" | "user" | "pi-project" | "project";
@@ -339,6 +341,7 @@ function loadAgentsFromDir(dir: string, source: AgentConfig["source"]): AgentCon
 			description: frontmatter.description,
 			tools: tools && tools.length > 0 ? tools : undefined,
 			model: frontmatter.model,
+			provider: frontmatter.provider,
 			thinking: frontmatter.thinking,
 			systemPrompt: body,
 			source,
@@ -745,6 +748,7 @@ async function runSingleAgent(
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (agent.model) args.push("--model", agent.model);
+	if (agent.provider) args.push("--provider", agent.provider);
 	if (agent.thinking) args.push("--thinking", agent.thinking);
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
