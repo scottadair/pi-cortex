@@ -87,6 +87,21 @@ function getProjectAgentsDir(cwd: string): string {
 	return path.join(cwd, ".cortex", "agents");
 }
 
+/**
+ * Read project-level provider defaults from .cortex/providers.json.
+ * Returns default provider and model for agents that don't specify their own.
+ */
+function getProjectProviderDefaults(cwd: string): { agents?: string; model?: string } {
+	try {
+		const configPath = path.join(cwd, ".cortex", "providers.json");
+		if (!fs.existsSync(configPath)) return {};
+		const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+		return config.defaults || {};
+	} catch {
+		return {};
+	}
+}
+
 function ensureProjectAgentsDir(cwd: string): string {
 	const dir = getProjectAgentsDir(cwd);
 	fs.mkdirSync(dir, { recursive: true });
@@ -747,8 +762,21 @@ async function runSingleAgent(
 	}
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
-	if (agent.model) args.push("--model", agent.model);
-	if (agent.provider) args.push("--provider", agent.provider);
+
+	// Read project provider defaults from .cortex/providers.json
+	const projectDefaults = getProjectProviderDefaults(cwd);
+	const effectiveProvider = agent.provider || projectDefaults.agents;
+	const effectiveModel = agent.model || projectDefaults.model;
+
+	// Use provider/model syntax when both are set so pi resolves the
+	// model under the correct provider's credentials
+	if (effectiveModel && effectiveProvider) {
+		args.push("--model", `${effectiveProvider}/${effectiveModel}`);
+	} else {
+		if (effectiveModel) args.push("--model", effectiveModel);
+		if (effectiveProvider) args.push("--provider", effectiveProvider);
+	}
+
 	if (agent.thinking) args.push("--thinking", agent.thinking);
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 

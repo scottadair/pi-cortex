@@ -54,6 +54,8 @@ interface ProvidersConfig {
 		agents?: string;
 		/** Default provider for interactive mode */
 		interactive?: string;
+		/** Default model ID */
+		model?: string;
 	};
 }
 
@@ -150,6 +152,29 @@ function writeConfigFile(filePath: string, config: ProvidersConfig): void {
 	fs.writeFileSync(filePath, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
 
+/**
+ * Check if a value looks like a raw API key (not an env var reference).
+ */
+function looksLikeRawKey(value: string): boolean {
+	if (value.startsWith("sk-") || value.startsWith("key-")) return true;
+	if (value.length > 40 && /[a-z]/.test(value) && /[A-Z0-9]/.test(value)) return true;
+	return false;
+}
+
+/**
+ * SECURITY: Write to project-local config with raw API keys stripped.
+ * Project .cortex/providers.json must never contain raw keys.
+ */
+function safeWriteProjectConfig(filePath: string, config: ProvidersConfig): void {
+	const safe = JSON.parse(JSON.stringify(config)) as ProvidersConfig;
+	for (const account of Object.values(safe.accounts)) {
+		if (account.apiKey && looksLikeRawKey(account.apiKey)) {
+			delete account.apiKey;
+		}
+	}
+	writeConfigFile(filePath, safe);
+}
+
 function addAccountToFile(
 	filePath: string,
 	name: string,
@@ -171,6 +196,7 @@ function removeAccountFromFile(filePath: string, name: string): boolean {
 	delete existing.accounts[name];
 	if (existing.defaults?.agents === name) delete existing.defaults.agents;
 	if (existing.defaults?.interactive === name) delete existing.defaults.interactive;
+	if (existing.defaults?.model === name) delete existing.defaults.model;
 	writeConfigFile(filePath, existing);
 	return true;
 }
@@ -524,6 +550,95 @@ async function handleRemove(ctx: any, currentConfig: ProvidersConfig, doLoad: ()
 }
 
 // ---------------------------------------------------------------------------
+// Default provider handler
+// ---------------------------------------------------------------------------
+
+async function handleDefault(
+	ctx: any,
+	currentConfig: ProvidersConfig,
+	lastRegistered: string[],
+	cwd: string,
+	doLoad: () => any,
+): Promise<void> {
+	if (lastRegistered.length === 0) {
+		ctx.ui.notify("No providers configured. Run `/providers add` first.", "info");
+		return;
+	}
+
+	const current = currentConfig.defaults?.agents;
+	const labels = lastRegistered.map((name) =>
+		name === current ? `${name}  (current)` : name,
+	);
+
+	const choice = await ctx.ui.select("Default provider for this project", labels);
+	if (!choice) { ctx.ui.notify("Cancelled", "info"); return; }
+
+	const selected = choice.split("  ")[0].trim();
+	const projectPath = getProjectConfigPath(cwd);
+	const existing = readConfigFile(projectPath) || { accounts: {} };
+	existing.defaults = existing.defaults || {};
+	existing.defaults.agents = selected;
+	safeWriteProjectConfig(projectPath, existing);
+
+	doLoad();
+	ctx.ui.notify(`✓ Default provider set to '${selected}'`, "info");
+}
+
+// ---------------------------------------------------------------------------
+// Default model handler
+// ---------------------------------------------------------------------------
+
+async function handleModel(
+	ctx: any,
+	currentConfig: ProvidersConfig,
+	cwd: string,
+	doLoad: () => any,
+): Promise<void> {
+	const modelId = await ctx.ui.input(
+		"Default model ID for this project",
+		currentConfig.defaults?.model || "",
+	);
+	if (!modelId) { ctx.ui.notify("Cancelled", "info"); return; }
+
+	const projectPath = getProjectConfigPath(cwd);
+	const existing = readConfigFile(projectPath) || { accounts: {} };
+	existing.defaults = existing.defaults || {};
+	existing.defaults.model = modelId.trim();
+	safeWriteProjectConfig(projectPath, existing);
+
+	doLoad();
+	ctx.ui.notify(`✓ Default model set to '${modelId.trim()}'`, "info");
+}
+
+// ---------------------------------------------------------------------------
+// Session-only switch handler
+// ---------------------------------------------------------------------------
+
+async function handleSwitch(
+	ctx: any,
+	currentConfig: ProvidersConfig,
+	lastRegistered: string[],
+): Promise<void> {
+	if (lastRegistered.length === 0) {
+		ctx.ui.notify("No providers configured. Run `/providers add` first.", "info");
+		return;
+	}
+
+	const current = currentConfig.defaults?.agents;
+	const labels = lastRegistered.map((name) =>
+		name === current ? `${name}  (current)` : name,
+	);
+
+	const choice = await ctx.ui.select("Switch provider (this session only)", labels);
+	if (!choice) { ctx.ui.notify("Cancelled", "info"); return; }
+
+	const selected = choice.split("  ")[0].trim();
+	currentConfig.defaults = currentConfig.defaults || {};
+	currentConfig.defaults.agents = selected;
+	ctx.ui.notify(`Switched to '${selected}' for this session. Use \`/providers default\` to persist.`, "info");
+}
+
+// ---------------------------------------------------------------------------
 // Provider registration
 // ---------------------------------------------------------------------------
 
@@ -602,7 +717,7 @@ export default function (pi: ExtensionAPI) {
 
 	// /providers command
 	pi.registerCommand("providers", {
-		description: "Manage provider accounts (list, add, remove, reload)",
+		description: "Manage provider accounts (list, add, remove, default, model, switch, reload)",
 		handler: async (args, ctx) => {
 			const subcommand = args?.trim().toLowerCase() || "list";
 
@@ -614,6 +729,21 @@ export default function (pi: ExtensionAPI) {
 			// ── Remove ───────────────────────────────────────────
 			if (subcommand === "remove" || subcommand === "rm") {
 				return handleRemove(ctx, currentConfig, doLoad);
+			}
+
+			// ── Default ──────────────────────────────────────────
+			if (subcommand === "default" || subcommand === "def") {
+				return handleDefault(ctx, currentConfig, lastRegistered, cwd, doLoad);
+			}
+
+			// ── Model ────────────────────────────────────────────
+			if (subcommand === "model") {
+				return handleModel(ctx, currentConfig, cwd, doLoad);
+			}
+
+			// ── Switch ───────────────────────────────────────────
+			if (subcommand === "switch" || subcommand === "sw") {
+				return handleSwitch(ctx, currentConfig, lastRegistered);
 			}
 
 			// ── Reload ───────────────────────────────────────────
@@ -661,13 +791,16 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 
-				if (currentConfig.defaults?.agents || currentConfig.defaults?.interactive) {
+				if (currentConfig.defaults?.agents || currentConfig.defaults?.interactive || currentConfig.defaults?.model) {
 					lines.push("## Defaults\n");
 					if (currentConfig.defaults.agents) {
 						lines.push(`- Agents: **${currentConfig.defaults.agents}**`);
 					}
 					if (currentConfig.defaults.interactive) {
 						lines.push(`- Interactive: **${currentConfig.defaults.interactive}**`);
+					}
+					if (currentConfig.defaults.model) {
+						lines.push(`- Model: **${currentConfig.defaults.model}**`);
 					}
 					lines.push("");
 				}
@@ -690,7 +823,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			ctx.ui.notify(
-				`Unknown subcommand: '${subcommand}'. Available: list, add, remove, reload`,
+				`Unknown subcommand: '${subcommand}'. Available: list, add, remove, default, model, switch, reload`,
 				"error",
 			);
 		},
