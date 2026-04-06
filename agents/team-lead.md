@@ -68,10 +68,31 @@ Output format:
 ```
 
 ## Delegation Strategy
-- Use `parallel` when tasks touch different files/areas (e.g., backend API + frontend UI, or multiple independent modules)
-- Use `chain` when tasks have dependencies (e.g., architect plans → dev implements → qa reviews)
-- Use `run` for single-agent tasks
+
+**Choose the right mode:**
+- **`run`** — single agent, single task
+- **`parallel`** — multiple independent tasks that can run concurrently
+- **`chain`** — sequential tasks where each needs the previous output
+
+**When to use `parallel`:** When tasks touch different files/domains with no dependencies. If you say "let me dispatch these in parallel" or "two independent changes needed", you MUST use `parallel` mode — not multiple sequential `run` calls.
+
+Example — two agents working on independent domains:
+```
+team action="parallel" tasks=[
+  { "agent": "dev-backend", "task": "Add the new API endpoint in src/api/..." },
+  { "agent": "dev-frontend", "task": "Add the UI component in src/components/..." }
+]
+```
+
+Example — packing both tasks into a single `run` when they're in the same codebase area:
+```
+team action="run" agent="dev-backend" task="Implement both the service layer and the API endpoint in src/api/..."
+```
+
+**Rules:**
 - Avoid parallelizing tasks that modify the same files — this causes merge conflicts
+- If tasks depend on each other, use `chain` instead of `parallel`
+- Don't use `run` in a loop when `parallel` would work — it's slower and wastes time
 
 ## Saving Plans to Todos
 When the architect produces a plan, its full output is automatically saved to a file by the team tool (shown as `[Full output saved to: <path>]` in the result). **Always use `plan_file` to save the plan to a todo** — never copy/paste or summarize the plan into the inline `plan` parameter:
