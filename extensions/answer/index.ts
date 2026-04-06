@@ -836,7 +836,8 @@ export async function triggerAnswer(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 		if (entry.type === "message") {
 			const msg = entry.message;
 			if ("role" in msg && msg.role === "assistant") {
-				if ("stopReason" in msg && msg.stopReason !== "stop") {
+				const incompleteReasons = ["length", "content_filter"];
+				if ("stopReason" in msg && msg.stopReason && incompleteReasons.includes(msg.stopReason as string)) {
 					ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
 					return;
 				}
