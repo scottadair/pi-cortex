@@ -158,23 +158,11 @@ export default function (pi: ExtensionAPI) {
 						});
 					}
 
-					// Right: context % (placeholder - we estimate from token counts)
-					const contextWindow = ctx.model?.contextWindow ?? 0;
-					if (contextWindow > 0) {
-						// Rough estimate: last assistant message's input tokens as context usage
-						let contextTokens = 0;
-						const entries = ctx.sessionManager.getBranch();
-						for (let i = entries.length - 1; i >= 0; i--) {
-							const e = entries[i];
-							if (e.type === "message" && e.message.role === "assistant") {
-								const m = e.message as AssistantMessage;
-								contextTokens = (m.usage?.input ?? 0) + (m.usage?.output ?? 0);
-								break;
-							}
-						}
-
-						const pct = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
-						const pctStr = `${pct.toFixed(0)}%/${formatNumber(contextWindow)}`;
+					// Right: context usage %
+					const contextUsage = ctx.getContextUsage();
+					if (contextUsage) {
+						const pct = contextUsage.percent ?? 0;
+						const pctStr = `${pct.toFixed(0)}%/${formatNumber(contextUsage.contextWindow)}`;
 
 						let contextColor: string;
 						let contextIcon: string;
