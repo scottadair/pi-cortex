@@ -772,7 +772,7 @@ async function runSingleAgent(
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 
 	// Read project provider defaults from .cortex/providers.json
-	const projectDefaults = getProjectProviderDefaults(cwd);
+	const projectDefaults = getProjectProviderDefaults(defaultCwd);
 	const effectiveProvider = agent.provider || projectDefaults.agents;
 	const effectiveModel = agent.model || projectDefaults.model;
 
