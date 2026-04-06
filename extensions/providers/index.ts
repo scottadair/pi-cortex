@@ -18,6 +18,8 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { Api, Model } from "@mariozechner/pi-ai";
+import { ModelPickerComponent } from "./model-picker.js";
 import {
 	type Component,
 	Key,
@@ -591,25 +593,47 @@ async function handleDefault(
 // ---------------------------------------------------------------------------
 
 async function handleModel(
+	pi: ExtensionAPI,
 	ctx: any,
 	currentConfig: ProvidersConfig,
 	cwd: string,
 	doLoad: () => any,
 ): Promise<void> {
-	const modelId = await ctx.ui.input(
-		"Default model ID for this project",
-		currentConfig.defaults?.model || "",
-	);
-	if (!modelId) { ctx.ui.notify("Cancelled", "info"); return; }
+	// Get all available models from the registry
+	const allModels: Model<Api>[] = ctx.modelRegistry.getAvailable();
+	if (allModels.length === 0) {
+		ctx.ui.notify("No models available. Check your API keys.", "error");
+		return;
+	}
 
+	const currentModelId = ctx.model?.id;
+
+	// Show interactive model picker
+	const selected: Model<Api> | null = await (ctx.ui.custom as any)(
+		(tui: TUI, _theme: any, _kb: any, done: (r: Model<Api> | null) => void) => {
+			return new ModelPickerComponent(allModels, currentModelId, tui, done);
+		},
+	);
+
+	if (!selected) { ctx.ui.notify("Cancelled", "info"); return; }
+
+	// Save as project default
 	const projectPath = getProjectConfigPath(cwd);
 	const existing = readConfigFile(projectPath) || { accounts: {} };
 	existing.defaults = existing.defaults || {};
-	existing.defaults.model = modelId.trim();
+	existing.defaults.model = selected.id;
 	safeWriteProjectConfig(projectPath, existing);
 
+	// Also set as active model for this session
+	const success = await pi.setModel(selected);
+
 	doLoad();
-	ctx.ui.notify(`✓ Default model set to '${modelId.trim()}'`, "info");
+
+	if (success) {
+		ctx.ui.notify(`✓ Model set to '${selected.id}' (active + saved as default)`, "info");
+	} else {
+		ctx.ui.notify(`✓ Default model saved as '${selected.id}' (could not activate — no API key)`, "info");
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -965,7 +989,7 @@ export default function (pi: ExtensionAPI) {
 
 			// ── Model ────────────────────────────────────────────
 			if (subcommand === "model") {
-				return handleModel(ctx, currentConfig, cwd, doLoad);
+				return handleModel(pi, ctx, currentConfig, cwd, doLoad);
 			}
 
 			// ── Switch ───────────────────────────────────────────
@@ -1037,7 +1061,7 @@ export default function (pi: ExtensionAPI) {
 					} else if (action === "default") {
 						await handleDefault(ctx, currentConfig, lastRegistered, cwd, doLoad);
 					} else if (action === "model") {
-						await handleModel(ctx, currentConfig, cwd, doLoad);
+						await handleModel(pi, ctx, currentConfig, cwd, doLoad);
 					} else if (action === "switch") {
 						await handleSwitch(ctx, currentConfig, lastRegistered);
 					} else if (action.startsWith("remove:")) {
