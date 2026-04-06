@@ -1,9 +1,9 @@
 /**
  * Welcome Extension - Startup Screen
  *
- * Shows a branded welcome screen with logo, tips, and recent sessions.
- * Replaces the default pi header with a two-column layout inspired by
- * oh-my-pi's WelcomeComponent.
+ * Shows a branded welcome screen with Pi logo, tips, and recent sessions.
+ * Replaces the default pi header with a full-width two-column layout
+ * inspired by oh-my-pi's WelcomeComponent.
  *
  * The welcome header is shown once at startup and replaced when the
  * user starts typing or runs a command.
@@ -34,10 +34,12 @@ function timeAgo(date: Date): string {
 // Logo (block art, gradient magenta -> cyan)
 // ---------------------------------------------------------------------------
 
-const CORTEX_LOGO = [
-	" _____  _____  ______ _______ _______ _     _ ",
-	"|       |     | |____/    |    |______  \\___/  ",
-	"|_____  |_____| |    \\    |    |______ _/   \\_ ",
+const PI_LOGO = [
+	"▀████████████▀",
+	" ╘███    ███  ",
+	"  ███    ███  ",
+	"  ███    ███  ",
+	" ▄███▄  ▄███▄",
 ];
 
 function gradientLine(line: string): string {
@@ -129,8 +131,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				invalidate() {},
 				render(termWidth: number): string[] {
-					const maxWidth = 90;
-					const boxWidth = Math.min(maxWidth, Math.max(20, termWidth - 2));
+					const boxWidth = Math.max(20, termWidth - 2);
 					const innerWidth = boxWidth - 2; // for borders
 
 					// Box drawing chars
@@ -155,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 						// Left column: logo + model info
 						const leftLines: string[] = [];
 						leftLines.push("");
-						for (const logoLine of CORTEX_LOGO) {
+						for (const logoLine of PI_LOGO) {
 							leftLines.push(center(gradientLine(logoLine), leftWidth));
 						}
 						leftLines.push("");
@@ -207,7 +208,7 @@ export default function (pi: ExtensionAPI) {
 					} else {
 						// Single column fallback for narrow terminals
 						lines.push(v + pad("", innerWidth) + v);
-						for (const logoLine of CORTEX_LOGO) {
+						for (const logoLine of PI_LOGO) {
 							lines.push(v + center(gradientLine(logoLine), innerWidth) + v);
 						}
 						lines.push(v + pad("", innerWidth) + v);
