@@ -282,9 +282,12 @@ class MaskedInputComponent implements Component {
 			return;
 		}
 
+		// Strip bracketed paste mode escape sequences
+		const cleaned = data.replace(/\x1b\[200~/g, "").replace(/\x1b\[201~/g, "");
+
 		// Append printable characters (handles paste)
 		let changed = false;
-		for (const ch of data) {
+		for (const ch of cleaned) {
 			const code = ch.charCodeAt(0);
 			if (code >= 32 && code !== 127) {
 				this.value += ch;
