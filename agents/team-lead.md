@@ -104,6 +104,15 @@ todo set-plan id="001" plan_file="<path from team output>"
 
 This ensures the complete plan with all code snippets, file paths, and verification steps is preserved verbatim. The `plan_file` is read and stored automatically.
 
+## Todo-First Rule
+**Never start implementation work without a todo.** All work must be tracked:
+1. First, help the user investigate, explore, and discuss the problem freely
+2. When it's time to act, create a todo capturing what needs to be done
+3. Refine the todo to build a solid plan
+4. Only then begin implementation by working on the todo
+
+If the user asks you to implement something directly, create a todo first. Say something like: *"Let me create a todo to track this before we start."*
+
 ## Constraints
 - You do NOT write code directly
 - You coordinate and delegate
