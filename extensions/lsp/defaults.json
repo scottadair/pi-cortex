@@ -1,0 +1,81 @@
+{
+  "typescript-language-server": {
+    "command": "typescript-language-server",
+    "args": ["--stdio"],
+    "fileTypes": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+    "rootMarkers": ["package.json", "tsconfig.json", "jsconfig.json"],
+    "initOptions": { "hostInfo": "cortex" },
+    "settings": {}
+  },
+  "rust-analyzer": {
+    "command": "rust-analyzer",
+    "args": [],
+    "fileTypes": [".rs"],
+    "rootMarkers": ["Cargo.toml"],
+    "initOptions": {},
+    "settings": {}
+  },
+  "gopls": {
+    "command": "gopls",
+    "args": ["serve"],
+    "fileTypes": [".go"],
+    "rootMarkers": ["go.mod", "go.work"],
+    "settings": {
+      "gopls": {
+        "analyses": { "unusedparams": true, "shadow": true },
+        "staticcheck": true
+      }
+    }
+  },
+  "pyright": {
+    "command": "pyright-langserver",
+    "args": ["--stdio"],
+    "fileTypes": [".py", ".pyi"],
+    "rootMarkers": ["pyproject.toml", "pyrightconfig.json", "setup.py", "requirements.txt"],
+    "settings": {
+      "python": { "analysis": { "typeCheckingMode": "basic" } }
+    }
+  },
+  "vscode-css-language-server": {
+    "command": "vscode-css-language-server",
+    "args": ["--stdio"],
+    "fileTypes": [".css", ".scss", ".less"],
+    "rootMarkers": ["package.json"],
+    "settings": {}
+  },
+  "vscode-html-language-server": {
+    "command": "vscode-html-language-server",
+    "args": ["--stdio"],
+    "fileTypes": [".html", ".htm"],
+    "rootMarkers": ["package.json"],
+    "settings": {}
+  },
+  "vscode-json-language-server": {
+    "command": "vscode-json-language-server",
+    "args": ["--stdio"],
+    "fileTypes": [".json", ".jsonc"],
+    "rootMarkers": ["package.json"],
+    "settings": {}
+  },
+  "clangd": {
+    "command": "clangd",
+    "args": ["--background-index"],
+    "fileTypes": [".c", ".h", ".cpp", ".cc", ".cxx", ".hpp"],
+    "rootMarkers": ["compile_commands.json", "CMakeLists.txt", ".clangd"],
+    "settings": {}
+  },
+  "zls": {
+    "command": "zls",
+    "args": [],
+    "fileTypes": [".zig"],
+    "rootMarkers": ["build.zig"],
+    "settings": {}
+  },
+  "lua-language-server": {
+    "command": "lua-language-server",
+    "args": [],
+    "fileTypes": [".lua"],
+    "rootMarkers": [".luarc.json", ".luarc.jsonc"],
+    "settings": {}
+  }
+}
