@@ -94,6 +94,15 @@ export default function (pi: ExtensionAPI) {
 					const leftSegments: Segment[] = [];
 					const rightSegments: Segment[] = [];
 
+					// Left: provider
+					const providerName = ctx.model?.provider || "";
+					if (providerName) {
+						leftSegments.push({
+							content: "⚡ " + theme.fg("dim", providerName),
+							visible: true,
+						});
+					}
+
 					// Left: model + thinking
 					const modelName = shortenModelName(modelId);
 					let modelStr = modelName;
