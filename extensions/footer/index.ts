@@ -5,7 +5,7 @@
  * inspired by oh-my-pi's StatusLineComponent.
  *
  * Features:
- * - Segmented layout with separators between sections
+ * - Segmented layout with emoji icons and clean spacing
  * - Colorized segments: model (magenta), path (cyan), git (green/yellow)
  * - Token stats, cost, and context % with threshold coloring
  * - Git branch with dirty/staged/untracked indicators
@@ -49,7 +49,7 @@ interface Segment {
 	visible: boolean;
 }
 
-const SEP = " | ";
+const SEP = "  ";
 
 // ---------------------------------------------------------------------------
 // Extension
@@ -94,12 +94,6 @@ export default function (pi: ExtensionAPI) {
 					const leftSegments: Segment[] = [];
 					const rightSegments: Segment[] = [];
 
-					// Left: cortex brand
-					leftSegments.push({
-						content: theme.fg("accent", "cortex"),
-						visible: true,
-					});
-
 					// Left: model + thinking
 					const modelName = shortenModelName(modelId);
 					let modelStr = modelName;
@@ -110,7 +104,7 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 					leftSegments.push({
-						content: theme.fg("customMessageLabel", modelStr),
+						content: "🧠 " + theme.fg("customMessageLabel", modelStr),
 						visible: true,
 					});
 
@@ -121,7 +115,7 @@ export default function (pi: ExtensionAPI) {
 						pathStr = "..." + pathStr.slice(-(pathMaxLen - 3));
 					}
 					leftSegments.push({
-						content: theme.fg("toolTitle", pathStr),
+						content: "📁 " + theme.fg("toolTitle", pathStr),
 						visible: true,
 					});
 
@@ -129,7 +123,7 @@ export default function (pi: ExtensionAPI) {
 					if (branch) {
 						const branchStr = branch === "detached" ? "detached" : branch;
 						leftSegments.push({
-							content: theme.fg("success", branchStr),
+							content: "🌿 " + theme.fg("success", branchStr),
 							visible: true,
 						});
 					}
@@ -137,9 +131,9 @@ export default function (pi: ExtensionAPI) {
 					// Right: tokens
 					if (totalInput || totalOutput) {
 						const parts: string[] = [];
-						if (totalInput) parts.push(`^${formatNumber(totalInput)}`);
-						if (totalOutput) parts.push(`v${formatNumber(totalOutput)}`);
-						if (totalCacheRead) parts.push(`R${formatNumber(totalCacheRead)}`);
+						if (totalInput) parts.push(`↑${formatNumber(totalInput)}`);
+						if (totalOutput) parts.push(`↓${formatNumber(totalOutput)}`);
+						if (totalCacheRead) parts.push(`📦${formatNumber(totalCacheRead)}`);
 						rightSegments.push({
 							content: theme.fg("dim", parts.join(" ")),
 							visible: true,
@@ -149,7 +143,7 @@ export default function (pi: ExtensionAPI) {
 					// Right: cost
 					if (totalCost > 0) {
 						rightSegments.push({
-							content: theme.fg("dim", `$${totalCost.toFixed(2)}`),
+							content: theme.fg("dim", `💰$${totalCost.toFixed(2)}`),
 							visible: true,
 						});
 					}
@@ -173,12 +167,13 @@ export default function (pi: ExtensionAPI) {
 						const pctStr = `${pct.toFixed(0)}%/${formatNumber(contextWindow)}`;
 
 						let contextColor: string;
-						if (pct >= 90) contextColor = "error";
-						else if (pct >= 70) contextColor = "warning";
-						else contextColor = "dim";
+						let contextIcon: string;
+						if (pct >= 90) { contextColor = "error"; contextIcon = "🔴"; }
+						else if (pct >= 70) { contextColor = "warning"; contextIcon = "🟡"; }
+						else { contextColor = "dim"; contextIcon = "🟢"; }
 
 						rightSegments.push({
-							content: theme.fg(contextColor as any, pctStr),
+							content: contextIcon + theme.fg(contextColor as any, pctStr),
 							visible: true,
 						});
 					}
@@ -232,8 +227,8 @@ export default function (pi: ExtensionAPI) {
 
 					const gapSize = Math.max(1, width - leftWidth - rightWidth);
 
-					// Fill gap with dim dashes
-					const gapFill = theme.fg("dim", "-".repeat(gapSize));
+					// Fill gap with spaces for a clean look
+					const gapFill = " ".repeat(gapSize);
 
 					const line = leftStr + gapFill + rightStr;
 					return [truncateToWidth(line, width)];
