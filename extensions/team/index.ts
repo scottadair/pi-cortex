@@ -79,6 +79,23 @@ const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 
+const AGENT_ICONS: Record<string, string> = {
+	"team-lead": "👑",
+	"architect": "🏗 ",
+	"dev-backend": "⚙ ",
+	"dev-frontend": "🎨",
+	"qa": "🔍",
+};
+const DEFAULT_AGENT_ICON = "🤖";
+
+function getAgentIcon(name: string): string {
+	// Check for partial matches (e.g. "dev-backend" matches "backend")
+	for (const [key, icon] of Object.entries(AGENT_ICONS)) {
+		if (name === key || name.includes(key)) return icon;
+	}
+	return DEFAULT_AGENT_ICON;
+}
+
 // ---------------------------------------------------------------------------
 // Agent management helpers
 // ---------------------------------------------------------------------------
@@ -736,12 +753,6 @@ class AgentWidgetManager {
 		const running = allStatuses.filter((a) => a.status === "running").length;
 		const total = entries.length;
 
-		const lines: string[] = [];
-		const header = running > 0
-			? `Team \u2500 ${running}/${total} running`
-			: `Team \u2500 ${total} done`;
-		lines.push(header);
-
 		// Sort: running first, then done/failed
 		const sorted = [...topLevel].sort((a, b) => {
 			if (a[1].status === "running" && b[1].status !== "running") return -1;
@@ -749,59 +760,100 @@ class AgentWidgetManager {
 			return 0;
 		});
 
-		// Calculate column width: longest (indent + name) across all rows
+		// Calculate column width: longest (indent + icon + name) across all rows
 		const TOP_INDENT = "  ";           // 2 chars
 		const CHILD_INDENT = "    \u2514 "; // 6 chars
 		let maxLabelLen = 0;
 		for (const [agentId, agent] of sorted) {
-			maxLabelLen = Math.max(maxLabelLen, TOP_INDENT.length + agent.name.length);
+			const icon = getAgentIcon(agent.name);
+			// Icons are typically 2 columns wide in terminals
+			const visualWidth = TOP_INDENT.length + 2 + 1 + agent.name.length; // indent + icon(2) + space + name
+			maxLabelLen = Math.max(maxLabelLen, visualWidth);
 			const children = nestedByParent.get(agentId);
 			if (children) {
 				for (const [_, child] of children) {
-					maxLabelLen = Math.max(maxLabelLen, CHILD_INDENT.length + child.name.length);
+					const childIcon = getAgentIcon(child.name);
+					const childVisualWidth = CHILD_INDENT.length + 2 + 1 + child.name.length;
+					maxLabelLen = Math.max(maxLabelLen, childVisualWidth);
 				}
 			}
 		}
 
-		const formatAgent = (agent: AgentStatus, indent: string, isNested: boolean) => {
-			const label = indent + agent.name;
-			const paddedLabel = label.padEnd(maxLabelLen);
-			const elapsed = Math.round((Date.now() - agent.startedAt) / 1000);
-			const elapsedStr = elapsed >= 60
-				? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
-				: `${elapsed}s`;
+		this.ctx.ui.setWidget("team-agents", (_tui, theme) => {
+			const lines: string[] = [];
 
-			let status: string;
-			if (agent.status === "running") status = "\u25B6 running";
-			else if (agent.status === "done") status = "\u2713 done  ";
-			else status = "\u2717 failed";
+			const border = (s: string) => theme.fg("border", s);
+			const headerText = running > 0
+				? theme.fg("warning", `${running}`) + theme.fg("muted", `/${total} running`)
+				: theme.fg("success", `${total} done`);
 
-			// Nested agents don't have their own turn/cost visibility,
-			// so show the delegated task instead
-			if (isNested) {
-				const taskPreview = agent.task.length > 50 ? agent.task.slice(0, 50) + "..." : agent.task;
-				return `${paddedLabel}  ${status}  ${taskPreview}  ${elapsedStr}`;
-			}
+			// Top border with header
+			const headerContent = theme.fg("accent", theme.bold("Team")) + theme.fg("muted", " \u2500 ") + headerText;
+			const headerVisualLen = 4 + 3 + (running > 0 ? `${running}/${total} running`.length : `${total} done`.length);
+			const topPadding = Math.max(0, 60 - headerVisualLen - 6); // 60 char width minus borders
+			lines.push(border("\u250c\u2500 ") + headerContent + border(" " + "\u2500".repeat(topPadding) + "\u2510"));
 
-			const turnsCost = `Turn ${agent.turns} | $${agent.cost.toFixed(2)}`;
-			const tool = agent.lastTool ? ` | ${agent.lastTool}` : "";
-			const toolTruncated = tool.length > 40 ? tool.slice(0, 40) + "..." : tool;
+			const formatAgent = (agent: AgentStatus, indent: string, isNested: boolean) => {
+				const icon = getAgentIcon(agent.name);
+				const label = indent + icon + " " + theme.fg("accent", agent.name);
+				// Calculate padding (account for emoji being 2 columns wide)
+				const visualLen = indent.length + 2 + 1 + agent.name.length; // indent + icon(2) + space + name
+				const paddingNeeded = maxLabelLen - visualLen;
+				const paddedLabel = label + " ".repeat(Math.max(0, paddingNeeded));
 
-			return `${paddedLabel}  ${status}  ${turnsCost}${toolTruncated}  ${elapsedStr}`;
-		};
+				const elapsed = Math.round((Date.now() - agent.startedAt) / 1000);
+				const elapsedStr = elapsed >= 60
+					? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
+					: `${elapsed}s`;
 
-		for (const [agentId, agent] of sorted) {
-			lines.push(formatAgent(agent, TOP_INDENT, false));
-			// Show nested agents under their parent
-			const children = nestedByParent.get(agentId);
-			if (children) {
-				for (const [_, child] of children) {
-					lines.push(formatAgent(child, CHILD_INDENT, true));
+				let status: string;
+				if (agent.status === "running") status = theme.fg("warning", "\u25b6 running");
+				else if (agent.status === "done") status = theme.fg("success", "\u2713 done  ");
+				else status = theme.fg("error", "\u2717 failed");
+
+				// Nested agents don't have their own turn/cost visibility,
+				// so show the delegated task instead
+				if (isNested) {
+					const taskPreview = agent.task.length > 50 ? agent.task.slice(0, 50) + "..." : agent.task;
+					return border("\u2502 ") + `${paddedLabel}  ${status}  ${theme.fg("dim", taskPreview)}  ${theme.fg("dim", elapsedStr)}` + border(" \u2502");
+				}
+
+				const turnsCost = theme.fg("dim", `T${agent.turns}`) + " " + theme.fg("muted", `$${agent.cost.toFixed(2)}`);
+				const tool = agent.lastTool ? theme.fg("muted", " \u2502 ") + theme.fg("toolTitle", agent.lastTool) : "";
+				const toolTruncated = tool.length > 40 ? tool.slice(0, 40) + "..." : tool;
+
+				return border("\u2502 ") + `${paddedLabel}  ${status}  ${turnsCost}${toolTruncated}  ${theme.fg("dim", elapsedStr)}` + border(" \u2502");
+			};
+
+			for (const [agentId, agent] of sorted) {
+				lines.push(formatAgent(agent, TOP_INDENT, false));
+				// Show nested agents under their parent
+				const children = nestedByParent.get(agentId);
+				if (children) {
+					for (const [_, child] of children) {
+						lines.push(formatAgent(child, CHILD_INDENT, true));
+					}
 				}
 			}
-		}
 
-		this.ctx.ui.setWidget("team-agents", lines, { placement: "aboveEditor" });
+			// Summary footer
+			const totalCost = allStatuses.reduce((sum, a) => sum + a.cost, 0);
+			const maxElapsed = allStatuses.length > 0 ? Math.max(...allStatuses.map(a => Math.round((Date.now() - a.startedAt) / 1000))) : 0;
+			const elapsedStr = maxElapsed >= 60
+				? `${Math.floor(maxElapsed / 60)}m${maxElapsed % 60}s`
+				: `${maxElapsed}s`;
+			const summaryText = theme.fg("dim", `Total: $${totalCost.toFixed(2)} \u2502 ${elapsedStr}`);
+			const summaryVisualLen = `Total: $${totalCost.toFixed(2)} | ${elapsedStr}`.length;
+			const summaryPadding = Math.max(0, 60 - summaryVisualLen - 4);
+			lines.push(border("\u251c" + "\u2500".repeat(60) + "\u2524"));
+			lines.push(border("\u2502 ") + summaryText + " ".repeat(summaryPadding) + border(" \u2502"));
+			lines.push(border("\u2514" + "\u2500".repeat(60) + "\u2518"));
+
+			return {
+				render: () => lines,
+				invalidate: () => {}
+			};
+		}, { placement: "aboveEditor" });
 	}
 }
 
