@@ -606,12 +606,16 @@ interface AgentStatus {
 	cost: number;
 	lastTool?: string;
 	startedAt: number;
+	parentId?: string;
+	delegatedAgent?: string;
 }
 
 class AgentWidgetManager {
 	private agents = new Map<string, AgentStatus>();
 	private ctx: ExtensionContext;
 	private removeTimer?: ReturnType<typeof setTimeout>;
+	// Track pending team tool calls: toolCallId → nested agentId in widget
+	private pendingDelegations = new Map<string, string>();
 
 	constructor(ctx: ExtensionContext) {
 		this.ctx = ctx;
@@ -641,10 +645,61 @@ class AgentWidgetManager {
 		}
 	}
 
+	/**
+	 * Register a nested agent delegation (e.g. team-lead → dev-frontend).
+	 * Called when we detect a `team` tool call with action "run" in messages.
+	 */
+	registerDelegation(parentAgentId: string, toolCallId: string, childName: string, childTask: string): void {
+		const childId = `${childName}-delegated-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+		this.pendingDelegations.set(toolCallId, childId);
+		this.agents.set(childId, {
+			name: childName,
+			task: childTask.length > 60 ? childTask.slice(0, 60) + "..." : childTask,
+			status: "running",
+			turns: 0,
+			cost: 0,
+			startedAt: Date.now(),
+			parentId: parentAgentId,
+		});
+		// Update parent to show it's delegating
+		const parent = this.agents.get(parentAgentId);
+		if (parent) {
+			parent.delegatedAgent = childName;
+		}
+		this.render();
+	}
+
+	/**
+	 * Complete a nested delegation when we see the tool result come back.
+	 */
+	completeDelegation(toolCallId: string, success: boolean): void {
+		const childId = this.pendingDelegations.get(toolCallId);
+		if (!childId) return;
+		this.pendingDelegations.delete(toolCallId);
+		const child = this.agents.get(childId);
+		if (child) {
+			child.status = success ? "done" : "failed";
+		}
+		// Clear parent's delegatedAgent
+		if (child?.parentId) {
+			const parent = this.agents.get(child.parentId);
+			if (parent && parent.delegatedAgent === child.name) {
+				parent.delegatedAgent = undefined;
+			}
+		}
+		this.render();
+	}
+
 	complete(agentId: string, success: boolean): void {
 		const agent = this.agents.get(agentId);
 		if (agent) {
 			agent.status = success ? "done" : "failed";
+			// Also complete any still-running nested agents under this parent
+			for (const [childId, child] of this.agents) {
+				if (child.parentId === agentId && child.status === "running") {
+					child.status = success ? "done" : "failed";
+				}
+			}
 			this.render();
 		}
 		const allDone = [...this.agents.values()].every((a) => a.status !== "running");
@@ -666,10 +721,21 @@ class AgentWidgetManager {
 	private render(): void {
 		if (!this.ctx.hasUI) return;
 
-		const entries = [...this.agents.values()];
-		const running = entries.filter((a) => a.status === "running").length;
+		const entries = [...this.agents.entries()];
+		// Separate top-level and nested agents
+		const topLevel = entries.filter(([_, a]) => !a.parentId);
+		const nested = entries.filter(([_, a]) => a.parentId);
+		const nestedByParent = new Map<string, [string, AgentStatus][]>();
+		for (const entry of nested) {
+			const parentId = entry[1].parentId!;
+			if (!nestedByParent.has(parentId)) nestedByParent.set(parentId, []);
+			nestedByParent.get(parentId)!.push(entry);
+		}
+
+		const allStatuses = entries.map(([_, a]) => a);
+		const running = allStatuses.filter((a) => a.status === "running").length;
 		const total = entries.length;
-		const maxNameLen = Math.max(...entries.map((a) => a.name.length), 0);
+		const maxNameLen = Math.max(...allStatuses.map((a) => a.name.length), 0);
 
 		const lines: string[] = [];
 		const header = running > 0
@@ -678,13 +744,13 @@ class AgentWidgetManager {
 		lines.push(header);
 
 		// Sort: running first, then done/failed
-		const sorted = [...entries].sort((a, b) => {
-			if (a.status === "running" && b.status !== "running") return -1;
-			if (a.status !== "running" && b.status === "running") return 1;
+		const sorted = [...topLevel].sort((a, b) => {
+			if (a[1].status === "running" && b[1].status !== "running") return -1;
+			if (a[1].status !== "running" && b[1].status === "running") return 1;
 			return 0;
 		});
 
-		for (const agent of sorted) {
+		const formatAgent = (agent: AgentStatus, indent: string) => {
 			const name = agent.name.padEnd(maxNameLen);
 			const elapsed = Math.round((Date.now() - agent.startedAt) / 1000);
 			const elapsedStr = elapsed >= 60
@@ -700,7 +766,18 @@ class AgentWidgetManager {
 			const tool = agent.lastTool ? ` | ${agent.lastTool}` : "";
 			const toolTruncated = tool.length > 40 ? tool.slice(0, 40) + "..." : tool;
 
-			lines.push(`  ${name}  ${status}  ${turnsCost}${toolTruncated}  ${elapsedStr}`);
+			return `${indent}${name}  ${status}  ${turnsCost}${toolTruncated}  ${elapsedStr}`;
+		};
+
+		for (const [agentId, agent] of sorted) {
+			lines.push(formatAgent(agent, "  "));
+			// Show nested agents under their parent
+			const children = nestedByParent.get(agentId);
+			if (children) {
+				for (const [_, child] of children) {
+					lines.push(formatAgent(child, "    \u2514 "));
+				}
+			}
 		}
 
 		this.ctx.ui.setWidget("team-agents", lines, { placement: "aboveEditor" });
@@ -885,6 +962,37 @@ async function runSingleAgent(
 							for (const part of content) {
 								if (part.type === "toolCall") {
 									lastTool = `${part.name} ${summarizeToolArgs(part.arguments ?? {})}`;
+									// Detect nested team delegations
+									if (part.name === "team" && part.id) {
+										const teamArgs = part.arguments ?? {};
+										if (teamArgs.action === "run" && teamArgs.agent) {
+											widget.registerDelegation(
+												agentId, part.id,
+												teamArgs.agent,
+												teamArgs.task || "(delegated task)",
+											);
+										} else if (teamArgs.action === "parallel" && Array.isArray(teamArgs.tasks)) {
+											for (const t of teamArgs.tasks) {
+												if (t.agent) {
+													widget.registerDelegation(
+														agentId, part.id,
+														t.agent,
+														t.task || "(parallel task)",
+													);
+												}
+											}
+										} else if (teamArgs.action === "chain" && Array.isArray(teamArgs.steps)) {
+											// For chains, show the first step as delegated
+											const first = teamArgs.steps[0];
+											if (first?.agent) {
+												widget.registerDelegation(
+													agentId, part.id,
+													`${first.agent} (+${teamArgs.steps.length - 1} more)`,
+													first.task || "(chain)",
+												);
+											}
+										}
+									}
 								}
 							}
 							widget.update(agentId, {
@@ -898,7 +1006,15 @@ async function runSingleAgent(
 					}
 
 					if (event.type === "tool_result_end" && event.message) {
-						currentResult.messages.push(event.message as Message);
+						const toolResultMsg = event.message as Message;
+						currentResult.messages.push(toolResultMsg);
+						// Complete nested delegation when tool result comes back
+						if (widget && toolResultMsg.role === "toolResult") {
+							const trMsg = toolResultMsg as any;
+							if (trMsg.toolCallId && trMsg.toolName === "team") {
+								widget.completeDelegation(trMsg.toolCallId, !trMsg.isError);
+							}
+						}
 						emitUpdate();
 					}
 				};
