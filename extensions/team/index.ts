@@ -777,12 +777,15 @@ async function runSingleAgent(
 	const effectiveModel = agent.model || projectDefaults.model;
 
 	// Use provider/model syntax when both are set so pi resolves the
-	// model under the correct provider's credentials
-	if (effectiveModel && effectiveProvider) {
+	// model under the correct provider's credentials.
+	// If the model already contains a "/" it already specifies its provider,
+	// so don't prepend another one (avoids "anthropic-work/anthropic/claude-sonnet-4-6").
+	const modelAlreadyHasProvider = effectiveModel ? effectiveModel.includes("/") : false;
+	if (effectiveModel && effectiveProvider && !modelAlreadyHasProvider) {
 		args.push("--model", `${effectiveProvider}/${effectiveModel}`);
 	} else {
 		if (effectiveModel) args.push("--model", effectiveModel);
-		if (effectiveProvider) args.push("--provider", effectiveProvider);
+		if (effectiveProvider && !modelAlreadyHasProvider) args.push("--provider", effectiveProvider);
 	}
 
 	if (agent.thinking) args.push("--thinking", agent.thinking);
