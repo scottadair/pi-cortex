@@ -81,8 +81,8 @@ const COLLAPSED_ITEM_COUNT = 10;
 
 const AGENT_ICONS: Record<string, string> = {
 	"team-lead": "👑",
-	"architect": "🏗 ",
-	"dev-backend": "⚙ ",
+	"architect": "🏗",
+	"dev-backend": "⚙",
 	"dev-frontend": "🎨",
 	"qa": "🔍",
 };
@@ -772,7 +772,7 @@ class AgentWidgetManager {
 			const children = nestedByParent.get(agentId);
 			if (children) {
 				for (const [_, child] of children) {
-					const childIcon = getAgentIcon(child.name);
+					// Icon width already accounted for in visual width calculation (all emoji are 2 columns)
 					const childVisualWidth = CHILD_INDENT.length + 2 + 1 + child.name.length;
 					maxLabelLen = Math.max(maxLabelLen, childVisualWidth);
 				}
@@ -780,18 +780,11 @@ class AgentWidgetManager {
 		}
 
 		this.ctx.ui.setWidget("team-agents", (_tui, theme) => {
-			const lines: string[] = [];
-
 			const border = (s: string) => theme.fg("border", s);
+
 			const headerText = running > 0
 				? theme.fg("warning", `${running}`) + theme.fg("muted", `/${total} running`)
 				: theme.fg("success", `${total} done`);
-
-			// Top border with header
-			const headerContent = theme.fg("accent", theme.bold("Team")) + theme.fg("muted", " \u2500 ") + headerText;
-			const headerVisualLen = 4 + 3 + (running > 0 ? `${running}/${total} running`.length : `${total} done`.length);
-			const topPadding = Math.max(0, 60 - headerVisualLen - 6); // 60 char width minus borders
-			lines.push(border("\u250c\u2500 ") + headerContent + border(" " + "\u2500".repeat(topPadding) + "\u2510"));
 
 			const formatAgent = (agent: AgentStatus, indent: string, isNested: boolean) => {
 				const icon = getAgentIcon(agent.name);
@@ -815,42 +808,46 @@ class AgentWidgetManager {
 				// so show the delegated task instead
 				if (isNested) {
 					const taskPreview = agent.task.length > 50 ? agent.task.slice(0, 50) + "..." : agent.task;
-					return border("\u2502 ") + `${paddedLabel}  ${status}  ${theme.fg("dim", taskPreview)}  ${theme.fg("dim", elapsedStr)}` + border(" \u2502");
+					return border("\u2502 ") + `${paddedLabel}  ${status}  ${theme.fg("dim", taskPreview)}  ${theme.fg("dim", elapsedStr)}`;
 				}
 
 				const turnsCost = theme.fg("dim", `T${agent.turns}`) + " " + theme.fg("muted", `$${agent.cost.toFixed(2)}`);
-				const tool = agent.lastTool ? theme.fg("muted", " \u2502 ") + theme.fg("toolTitle", agent.lastTool) : "";
-				const toolTruncated = tool.length > 40 ? tool.slice(0, 40) + "..." : tool;
+				// Truncate the raw tool string BEFORE applying theme colors
+				const rawTool = agent.lastTool || "";
+				const toolTruncated = rawTool.length > 40 ? rawTool.slice(0, 40) + "..." : rawTool;
+				const tool = toolTruncated ? theme.fg("muted", " \u2502 ") + theme.fg("toolTitle", toolTruncated) : "";
 
-				return border("\u2502 ") + `${paddedLabel}  ${status}  ${turnsCost}${toolTruncated}  ${theme.fg("dim", elapsedStr)}` + border(" \u2502");
+				return border("\u2502 ") + `${paddedLabel}  ${status}  ${turnsCost}${tool}  ${theme.fg("dim", elapsedStr)}`;
 			};
 
-			for (const [agentId, agent] of sorted) {
-				lines.push(formatAgent(agent, TOP_INDENT, false));
-				// Show nested agents under their parent
-				const children = nestedByParent.get(agentId);
-				if (children) {
-					for (const [_, child] of children) {
-						lines.push(formatAgent(child, CHILD_INDENT, true));
-					}
-				}
-			}
-
-			// Summary footer
-			const totalCost = allStatuses.reduce((sum, a) => sum + a.cost, 0);
-			const maxElapsed = allStatuses.length > 0 ? Math.max(...allStatuses.map(a => Math.round((Date.now() - a.startedAt) / 1000))) : 0;
-			const elapsedStr = maxElapsed >= 60
-				? `${Math.floor(maxElapsed / 60)}m${maxElapsed % 60}s`
-				: `${maxElapsed}s`;
-			const summaryText = theme.fg("dim", `Total: $${totalCost.toFixed(2)} \u2502 ${elapsedStr}`);
-			const summaryVisualLen = `Total: $${totalCost.toFixed(2)} | ${elapsedStr}`.length;
-			const summaryPadding = Math.max(0, 60 - summaryVisualLen - 4);
-			lines.push(border("\u251c" + "\u2500".repeat(60) + "\u2524"));
-			lines.push(border("\u2502 ") + summaryText + " ".repeat(summaryPadding) + border(" \u2502"));
-			lines.push(border("\u2514" + "\u2500".repeat(60) + "\u2518"));
-
 			return {
-				render: () => lines,
+				render: () => {
+					const lines: string[] = [];
+
+					// Header
+					lines.push(border("\u250c\u2500 ") + theme.fg("accent", theme.bold("Team")) + theme.fg("muted", " \u2500 ") + headerText);
+
+					// Agent rows
+					for (const [agentId, agent] of sorted) {
+						lines.push(formatAgent(agent, TOP_INDENT, false));
+						const children = nestedByParent.get(agentId);
+						if (children) {
+							for (const [_, child] of children) {
+								lines.push(formatAgent(child, CHILD_INDENT, true));
+							}
+						}
+					}
+
+					// Summary footer
+					const totalCost = allStatuses.reduce((sum, a) => sum + a.cost, 0);
+					const maxElapsed = allStatuses.length > 0 ? Math.max(...allStatuses.map(a => Math.round((Date.now() - a.startedAt) / 1000))) : 0;
+					const elapsedStr = maxElapsed >= 60
+						? `${Math.floor(maxElapsed / 60)}m${maxElapsed % 60}s`
+						: `${maxElapsed}s`;
+					lines.push(border("\u2514\u2500 ") + theme.fg("dim", `Total: $${totalCost.toFixed(2)} \u2502 ${elapsedStr}`));
+
+					return lines;
+				},
 				invalidate: () => {}
 			};
 		}, { placement: "aboveEditor" });
