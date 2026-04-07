@@ -261,6 +261,7 @@ class BatchQuestionComponent implements Component {
 	private showingConfirmation: boolean = false;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private inOtherMode: boolean = false;
 
 	private dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 	private bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -343,7 +344,7 @@ class BatchQuestionComponent implements Component {
 	}
 
 	private saveCurrentInput(): void {
-		if (!this.isSelectQuestion) {
+		if (!this.isSelectQuestion || this.inOtherMode) {
 			this.currentResult.customInput = this.editor.getText();
 		}
 	}
@@ -351,9 +352,13 @@ class BatchQuestionComponent implements Component {
 	private navigateTo(index: number): void {
 		if (index < 0 || index >= this.questions.length) return;
 		this.saveCurrentInput();
+		this.inOtherMode = false;
 		this.currentIndex = index;
-		// Load editor for input questions
-		if (!this.isSelectQuestion) {
+		// Restore "Other" mode if question had custom input
+		if (this.isSelectQuestion && this.currentResult.customInput !== undefined) {
+			this.inOtherMode = true;
+			this.editor.setText(this.currentResult.customInput || "");
+		} else if (!this.isSelectQuestion) {
 			this.editor.setText(this.currentResult.customInput || "");
 		}
 		this.invalidate();
@@ -401,8 +406,19 @@ class BatchQuestionComponent implements Component {
 			return;
 		}
 
-		// Global navigation
-		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+		// Global navigation — Ctrl+C always cancels the overlay
+		if (matchesKey(data, Key.ctrl("c"))) {
+			this.onDone(null);
+			return;
+		}
+		if (matchesKey(data, Key.escape)) {
+			if (this.inOtherMode) {
+				this.inOtherMode = false;
+				this.currentResult.customInput = undefined;
+				this.invalidate();
+				this.tui.requestRender();
+				return;
+			}
 			this.onDone(null);
 			return;
 		}
@@ -420,6 +436,29 @@ class BatchQuestionComponent implements Component {
 				this.navigateTo(this.currentIndex + 1);
 				this.tui.requestRender();
 			}
+			return;
+		}
+
+		if (this.inOtherMode) {
+			if (matchesKey(data, Key.enter) && !matchesKey(data, Key.shift("enter"))) {
+				const text = this.editor.getText().trim();
+				if (!text) {
+					// Empty input — go back to select mode
+					this.inOtherMode = false;
+					this.currentResult.customInput = undefined;
+					this.invalidate();
+					this.tui.requestRender();
+					return;
+				}
+				this.currentResult.customInput = text;
+				this.inOtherMode = false;
+				this.advanceOrSubmit();
+				return;
+			}
+			// Forward all other input to editor
+			this.editor.handleInput(data);
+			this.invalidate();
+			this.tui.requestRender();
 			return;
 		}
 
@@ -454,12 +493,9 @@ class BatchQuestionComponent implements Component {
 				}
 
 				if (selected === OTHER_LABEL) {
-					// Switch to input mode for this question
+					this.inOtherMode = true;
 					this.currentResult.customInput = "";
 					this.editor.setText("");
-					// Temporarily treat as input — we'll render the editor
-					// Store that we're in "other" mode by clearing options temporarily
-					// Actually, let's just advance after getting input inline
 					this.invalidate();
 					this.tui.requestRender();
 					return;
@@ -559,7 +595,17 @@ class BatchQuestionComponent implements Component {
 		lines.push(padToWidth(emptyBoxLine()));
 
 		// Content: options or editor
-		if (this.isSelectQuestion) {
+		if (this.inOtherMode) {
+			// Show editor for custom answer
+			lines.push(padToWidth(boxLine(this.dim("Type your answer:"))));
+			lines.push(padToWidth(emptyBoxLine()));
+			const editorWidth = contentWidth - 4 - 3;
+			const editorLines = this.editor.render(editorWidth);
+			for (let i = 1; i < editorLines.length - 1; i++) {
+				if (i === 1) lines.push(padToWidth(boxLine(this.bold("A: ") + editorLines[i])));
+				else lines.push(padToWidth(boxLine("   " + editorLines[i])));
+			}
+		} else if (this.isSelectQuestion) {
 			const opts = this.getDisplayOptions();
 			const r = this.currentResult;
 			for (let i = 0; i < opts.length; i++) {
@@ -608,7 +654,9 @@ class BatchQuestionComponent implements Component {
 			);
 		} else {
 			lines.push(padToWidth(this.dim("\u251c" + horizontalLine(boxWidth - 2) + "\u2524")));
-			const navHint = this.isSelectQuestion
+			const navHint = this.inOtherMode
+				? `${this.dim("Enter")} accept \u00b7 ${this.dim("Shift+Enter")} newline \u00b7 ${this.dim("Esc")} back \u00b7 ${this.dim("\u2190\u2192")} question`
+				: this.isSelectQuestion
 				? `${this.dim("\u2191\u2193")} select \u00b7 ${this.dim("Enter")} pick \u00b7 ${this.dim("\u2190\u2192")} question \u00b7 ${this.dim("Esc")} cancel`
 				: `${this.dim("Enter")} next \u00b7 ${this.dim("\u2190\u2192")} question \u00b7 ${this.dim("Shift+Enter")} newline \u00b7 ${this.dim("Esc")} cancel`;
 			lines.push(padToWidth(boxLine(truncateToWidth(navHint, contentWidth))));
