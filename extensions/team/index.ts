@@ -735,7 +735,6 @@ class AgentWidgetManager {
 		const allStatuses = entries.map(([_, a]) => a);
 		const running = allStatuses.filter((a) => a.status === "running").length;
 		const total = entries.length;
-		const maxNameLen = Math.max(...allStatuses.map((a) => a.name.length), 0);
 
 		const lines: string[] = [];
 		const header = running > 0
@@ -750,8 +749,23 @@ class AgentWidgetManager {
 			return 0;
 		});
 
-		const formatAgent = (agent: AgentStatus, indent: string) => {
-			const name = agent.name.padEnd(maxNameLen);
+		// Calculate column width: longest (indent + name) across all rows
+		const TOP_INDENT = "  ";           // 2 chars
+		const CHILD_INDENT = "    \u2514 "; // 6 chars
+		let maxLabelLen = 0;
+		for (const [agentId, agent] of sorted) {
+			maxLabelLen = Math.max(maxLabelLen, TOP_INDENT.length + agent.name.length);
+			const children = nestedByParent.get(agentId);
+			if (children) {
+				for (const [_, child] of children) {
+					maxLabelLen = Math.max(maxLabelLen, CHILD_INDENT.length + child.name.length);
+				}
+			}
+		}
+
+		const formatAgent = (agent: AgentStatus, indent: string, isNested: boolean) => {
+			const label = indent + agent.name;
+			const paddedLabel = label.padEnd(maxLabelLen);
 			const elapsed = Math.round((Date.now() - agent.startedAt) / 1000);
 			const elapsedStr = elapsed >= 60
 				? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
@@ -762,20 +776,27 @@ class AgentWidgetManager {
 			else if (agent.status === "done") status = "\u2713 done  ";
 			else status = "\u2717 failed";
 
+			// Nested agents don't have their own turn/cost visibility,
+			// so show the delegated task instead
+			if (isNested) {
+				const taskPreview = agent.task.length > 50 ? agent.task.slice(0, 50) + "..." : agent.task;
+				return `${paddedLabel}  ${status}  ${taskPreview}  ${elapsedStr}`;
+			}
+
 			const turnsCost = `Turn ${agent.turns} | $${agent.cost.toFixed(2)}`;
 			const tool = agent.lastTool ? ` | ${agent.lastTool}` : "";
 			const toolTruncated = tool.length > 40 ? tool.slice(0, 40) + "..." : tool;
 
-			return `${indent}${name}  ${status}  ${turnsCost}${toolTruncated}  ${elapsedStr}`;
+			return `${paddedLabel}  ${status}  ${turnsCost}${toolTruncated}  ${elapsedStr}`;
 		};
 
 		for (const [agentId, agent] of sorted) {
-			lines.push(formatAgent(agent, "  "));
+			lines.push(formatAgent(agent, TOP_INDENT, false));
 			// Show nested agents under their parent
 			const children = nestedByParent.get(agentId);
 			if (children) {
 				for (const [_, child] of children) {
-					lines.push(formatAgent(child, "    \u2514 "));
+					lines.push(formatAgent(child, CHILD_INDENT, true));
 				}
 			}
 		}
