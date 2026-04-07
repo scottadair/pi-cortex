@@ -80,16 +80,22 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 
 const AGENT_ICONS: Record<string, string> = {
-	"team-lead": "👑",
-	"architect": "🏗",
-	"dev-backend": "⚙",
-	"dev-frontend": "🎨",
-	"qa": "🔍",
+	"team-lead": "👑 ",
+	"architect": "🏗  ",
+	"dev-backend": "⚙  ",
+	"dev-frontend": "🎨 ",
+	"qa": "🔍 ",
 };
-const DEFAULT_AGENT_ICON = "🤖";
+const DEFAULT_AGENT_ICON = "🤖 ";
+
+/** Visual column width of an icon string (emoji = 2 cols, spaces = 1 col each). */
+function iconVisualWidth(icon: string): number {
+	// Count trailing spaces; the emoji itself is 2 columns wide
+	const spaces = icon.length - icon.trimEnd().length;
+	return 2 + spaces;
+}
 
 function getAgentIcon(name: string): string {
-	// Check for partial matches (e.g. "dev-backend" matches "backend")
 	for (const [key, icon] of Object.entries(AGENT_ICONS)) {
 		if (name === key || name.includes(key)) return icon;
 	}
@@ -766,14 +772,13 @@ class AgentWidgetManager {
 		let maxLabelLen = 0;
 		for (const [agentId, agent] of sorted) {
 			const icon = getAgentIcon(agent.name);
-			// Icons are typically 2 columns wide in terminals
-			const visualWidth = TOP_INDENT.length + 2 + 1 + agent.name.length; // indent + icon(2) + space + name
+			const visualWidth = TOP_INDENT.length + iconVisualWidth(icon) + agent.name.length;
 			maxLabelLen = Math.max(maxLabelLen, visualWidth);
 			const children = nestedByParent.get(agentId);
 			if (children) {
 				for (const [_, child] of children) {
-					// Icon width already accounted for in visual width calculation (all emoji are 2 columns)
-					const childVisualWidth = CHILD_INDENT.length + 2 + 1 + child.name.length;
+					const childIcon = getAgentIcon(child.name);
+					const childVisualWidth = CHILD_INDENT.length + iconVisualWidth(childIcon) + child.name.length;
 					maxLabelLen = Math.max(maxLabelLen, childVisualWidth);
 				}
 			}
@@ -788,9 +793,8 @@ class AgentWidgetManager {
 
 			const formatAgent = (agent: AgentStatus, indent: string, isNested: boolean) => {
 				const icon = getAgentIcon(agent.name);
-				const label = indent + icon + " " + theme.fg("accent", agent.name);
-				// Calculate padding (account for emoji being 2 columns wide)
-				const visualLen = indent.length + 2 + 1 + agent.name.length; // indent + icon(2) + space + name
+				const label = indent + icon + theme.fg("accent", agent.name);
+				const visualLen = indent.length + iconVisualWidth(icon) + agent.name.length;
 				const paddingNeeded = maxLabelLen - visualLen;
 				const paddedLabel = label + " ".repeat(Math.max(0, paddingNeeded));
 
