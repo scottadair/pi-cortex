@@ -174,7 +174,11 @@ function updateAgentFrontmatter(
 		const { frontmatter, body } = parseFrontmatter<Record<string, any>>(content);
 		
 		if (updates.model !== undefined) {
-			frontmatter.model = updates.model;
+			if (updates.model === "") {
+				delete frontmatter.model;
+			} else {
+				frontmatter.model = updates.model;
+			}
 		}
 		
 		if (updates.tools !== undefined) {
@@ -1708,6 +1712,7 @@ export default function (pi: ExtensionAPI) {
 		private hintText: Text;
 		private disabledCount = 0;
 		public projectProviderDefault?: string;
+		public projectModelDefault?: string;
 
 		private _focused = false;
 		get focused(): boolean {
@@ -1860,7 +1865,11 @@ export default function (pi: ExtensionAPI) {
 				const sourceColor = agent.source === "project" ? "accent" : "muted";
 
 				const nameColor = isSelected ? "accent" : "text";
-				const modelText = agent.model ? this.theme.fg("dim", ` [${agent.model}]`) : "";
+				const modelText = agent.model
+					? this.theme.fg("dim", ` [${agent.model}]`)
+					: this.projectModelDefault
+						? this.theme.fg("dim", ` [default: ${this.projectModelDefault}]`)
+						: this.theme.fg("dim", " [default]");
 				const toolsText = agent.tools ? this.theme.fg("dim", ` {${agent.tools.length} tools}`) : "";
 				const thinkingText = agent.thinking ? this.theme.fg("dim", " ~" + agent.thinking) : "";
 
@@ -2005,6 +2014,7 @@ export default function (pi: ExtensionAPI) {
 			theme: ExtensionContext["theme"],
 			models: Model[],
 			currentModel: string | undefined,
+			projectDefaultModel: string | undefined,
 			onSelect: (modelId: string) => void,
 			onCancel: () => void,
 		) {
@@ -2019,7 +2029,15 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Build flat list with provider headers (non-selectable separators)
-			const items: SelectItem[] = [];
+			const items: SelectItem[] = [
+				{
+					value: "__default_model",
+					label: (currentModel ? "" : "✓ ") + "Use default model",
+					description: projectDefaultModel
+						? `Project default: ${projectDefaultModel}`
+						: "Use pi's active default model",
+				},
+			];
 			for (const [provider, providerModels] of grouped) {
 				// Add provider header as separator
 				items.push({ value: `__header_${provider}`, label: `--- ${provider} ---`, description: "" });
@@ -2045,6 +2063,10 @@ export default function (pi: ExtensionAPI) {
 			this.selectList.onSelect = (item) => {
 				// Skip header items
 				if (item.value.startsWith("__header_")) return;
+				if (item.value === "__default_model") {
+					onSelect("");
+					return;
+				}
 				onSelect(item.value);
 			};
 			this.selectList.onCancel = onCancel;
@@ -2485,13 +2507,19 @@ export default function (pi: ExtensionAPI) {
 					if (action === "model") {
 						const targetAgent = ensureProjectAgent(agent);
 						const models = ctx.modelRegistry.getAvailable();
+						const projectDefaults = getProjectProviderDefaults(cwd);
 						const modelPicker = new ModelPickerComponent(
 							theme,
 							models,
 							targetAgent.model,
+							projectDefaults.model,
 							(modelId) => {
 								updateAgentFrontmatter(targetAgent, { model: modelId });
-								ctx.ui.notify(`Updated model for ${targetAgent.name}`, "info");
+								if (modelId) {
+									ctx.ui.notify(`Updated model for ${targetAgent.name}`, "info");
+								} else {
+									ctx.ui.notify(`Cleared model for ${targetAgent.name} (using default)`, "info");
+								}
 								refreshAgents();
 								setActiveComponent(selector);
 							},
@@ -2711,7 +2739,9 @@ export default function (pi: ExtensionAPI) {
 					() => done(),
 					handleQuickAction,
 				);
-				selector.projectProviderDefault = getProjectProviderDefaults(cwd).agents;
+				const projectDefaults = getProjectProviderDefaults(cwd);
+				selector.projectProviderDefault = projectDefaults.agents;
+				selector.projectModelDefault = projectDefaults.model;
 
 				setActiveComponent(selector);
 

@@ -103,12 +103,14 @@ Override built-in agents or add new ones by placing markdown files in `.cortex/a
 name: my-agent
 description: What this agent does
 tools: read, write, edit, bash, grep, find, ls
-model: claude-sonnet-4-5
+# model: anthropic/claude-sonnet-4-5  # optional override
 thinking: high
 ---
 
 System prompt for the agent...
 ```
+
+If `model` is omitted, the agent uses the current default model.
 
 **Discovery order** (later wins): package defaults → `~/.pi/agent/agents/` → `.pi/agents/` → `.cortex/agents/`
 

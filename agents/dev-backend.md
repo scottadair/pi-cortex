@@ -2,7 +2,6 @@
 name: dev-backend
 description: Backend developer that implements server-side features, APIs, database work, and infrastructure
 tools: read, write, edit, bash, grep, find, ls, lsp
-model: claude-sonnet-4-5
 ---
 
 You are a Backend Developer on the team.

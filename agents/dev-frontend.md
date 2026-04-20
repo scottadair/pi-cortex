@@ -2,7 +2,6 @@
 name: dev-frontend
 description: Frontend developer that implements UI components, client-side logic, styling, and accessibility
 tools: read, write, edit, bash, grep, find, ls, lsp
-model: claude-sonnet-4-5
 ---
 
 You are a Frontend Developer on the team.

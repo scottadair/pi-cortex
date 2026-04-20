@@ -2,7 +2,6 @@
 name: custom-agent
 description: A custom agent for specialized tasks
 tools: read, write, edit, bash, grep, find, ls
-model: claude-sonnet-4-5
 ---
 
 You are a [Role Name] on the team.

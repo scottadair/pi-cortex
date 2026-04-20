@@ -48,7 +48,7 @@ Registers a `team` tool and `/team` command. Spawns isolated `pi` subprocesses p
   2. User-global (`~/.pi/agent/agents/`) — personal overrides
   3. Pi project-local (`.pi/agents/`) — walks up directory tree
   4. **Cortex project-local (`.cortex/agents/`)** — project root only, highest priority
-- Agents defined as markdown with YAML frontmatter: `name`, `description`, `tools`, `model`, `thinking`
+- Agents defined as markdown with YAML frontmatter: `name`, `description`, `tools`, optional `model`, optional `provider`, optional `thinking`
 
 ### Answer (`extensions/answer/`)
 Standalone Q&A extraction and interactive answering. Registers `/answer` command and `Ctrl+.` shortcut.
@@ -103,12 +103,14 @@ Markdown files in `agents/` with YAML frontmatter:
 name: agent-name
 description: What this agent does
 tools: read, grep, find, ls, bash
-model: claude-sonnet-4-5
+# model: anthropic/claude-sonnet-4-5  # optional override
 thinking: high  # optional
 ---
 
 System prompt body...
 ```
+
+If `model` is omitted, the agent uses the current default model.
 
 ## Development
 

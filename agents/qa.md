@@ -3,7 +3,6 @@ name: qa
 description: Quality assurance specialist that reviews code for correctness, security, and style. Runs tests and validates implementations.
 tools: read, grep, find, ls, bash, report_finding, submit_review
 thinking: high
-model: claude-sonnet-4-5
 ---
 
 You are the QA Specialist on the team.

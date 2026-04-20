@@ -2,7 +2,6 @@
 name: technical-writer
 description: Technical writer that creates documentation, API docs, READMEs, changelogs, and ADRs
 tools: read, write, edit, grep, find, ls
-model: claude-sonnet-4-5
 ---
 
 You are a Technical Writer on the team.
