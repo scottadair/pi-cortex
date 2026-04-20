@@ -611,14 +611,21 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 
 type OnUpdateCallback = (partial: AgentToolResult<TeamDetails>) => void;
 
+function normalizeInlineText(text: string): string {
+	return text.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+
 function summarizeToolArgs(args: Record<string, unknown>): string {
 	const cmd = args.command as string | undefined;
-	if (cmd) return cmd.length > 60 ? cmd.slice(0, 60) + "..." : cmd;
+	if (cmd) {
+		const normalized = normalizeInlineText(cmd);
+		return normalized.length > 60 ? normalized.slice(0, 60) + "..." : normalized;
+	}
 	const filePath = (args.file_path || args.path) as string | undefined;
-	if (filePath) return filePath;
+	if (filePath) return normalizeInlineText(filePath);
 	const pattern = args.pattern as string | undefined;
-	if (pattern) return `/${pattern}/`;
-	return JSON.stringify(args).slice(0, 50);
+	if (pattern) return normalizeInlineText(`/${pattern}/`);
+	return normalizeInlineText(JSON.stringify(args)).slice(0, 50);
 }
 
 // ---------------------------------------------------------------------------
@@ -653,9 +660,10 @@ class AgentWidgetManager {
 			clearTimeout(this.removeTimer);
 			this.removeTimer = undefined;
 		}
+		const normalizedTask = normalizeInlineText(task);
 		this.agents.set(agentId, {
 			name,
-			task: task.length > 60 ? task.slice(0, 60) + "..." : task,
+			task: normalizedTask.length > 60 ? normalizedTask.slice(0, 60) + "..." : normalizedTask,
 			status: "running",
 			turns: 0,
 			cost: 0,
@@ -679,9 +687,10 @@ class AgentWidgetManager {
 	registerDelegation(parentAgentId: string, toolCallId: string, childName: string, childTask: string): void {
 		const childId = `${childName}-delegated-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 		this.pendingDelegations.set(toolCallId, childId);
+		const normalizedTask = normalizeInlineText(childTask);
 		this.agents.set(childId, {
 			name: childName,
-			task: childTask.length > 60 ? childTask.slice(0, 60) + "..." : childTask,
+			task: normalizedTask.length > 60 ? normalizedTask.slice(0, 60) + "..." : normalizedTask,
 			status: "running",
 			turns: 0,
 			cost: 0,
@@ -821,7 +830,7 @@ class AgentWidgetManager {
 
 				const turnsCost = theme.fg("dim", `T${agent.turns}`) + " " + theme.fg("muted", `$${agent.cost.toFixed(2)}`);
 				// Truncate the raw tool string BEFORE applying theme colors
-				const rawTool = agent.lastTool || "";
+				const rawTool = normalizeInlineText(agent.lastTool || "");
 				const toolTruncated = rawTool.length > 40 ? rawTool.slice(0, 40) + "..." : rawTool;
 				const tool = toolTruncated ? theme.fg("muted", " \u2502 ") + theme.fg("toolTitle", toolTruncated) : "";
 
