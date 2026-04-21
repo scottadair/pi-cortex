@@ -7,9 +7,11 @@
  * Actions:
  *   - create: Create a worktree for a todo (branch: todo/<id>-<slug>)
  *   - commit: Commit all changes in a todo's worktree
- *   - merge: Merge a todo's branch into the base branch
+ *   - merge: Merge a todo's branch into the base branch (legacy / exceptional use)
  *   - remove: Remove a todo's worktree and optionally its branch
  *   - list: List all active worktrees
+ *
+ * Normal flow is create → commit → push branch → open PR → remove worktree.
  */
 
 import { execSync } from "node:child_process";
@@ -110,7 +112,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Worktree",
 		description: [
 			"Manage git worktrees for todo isolation.",
-			"Actions: create (new worktree), commit (stage & commit all changes), merge (merge todo branch into base), remove (clean up worktree), list (show all).",
+			"Actions: create (new worktree), commit (stage & commit all changes), remove (clean up worktree), list (show all).",
+			"Normal delivery flow is push branch + open PR; merge exists only for exceptional/manual recovery cases.",
 			"Each todo gets its own branch (todo/<id>-<slug>) and working directory under .cortex/worktrees/.",
 		].join(" "),
 		parameters: WorktreeParams,

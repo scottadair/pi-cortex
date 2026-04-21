@@ -38,7 +38,7 @@ pi
 /scout-and-plan How would we add real-time notifications?
 ```
 
-**Debug an issue** — systematic root cause analysis and fix:
+**Debug an issue** — systematic root cause analysis first, with fixes only after explicit approval:
 ```
 /debug Users are getting 500 errors on the /api/orders endpoint
 ```
@@ -62,7 +62,7 @@ Run agents individually, in parallel, or chained sequentially. Each agent runs i
 Todos with rich implementation plans — not just checklists, but full documents with context, file paths, code snippets, and verification steps. Refine plans through interactive Q&A (`Ctrl+.`).
 
 ### Git Worktrees
-Each todo gets an isolated git branch and working directory. Implement features without touching your main working copy.
+Each todo gets an isolated git branch and working directory. Implement features without touching your main working copy, then push the branch and land changes through a PR instead of merging locally.
 
 ### Code Intelligence (LSP)
 Go-to-definition, references, hover, diagnostics, rename, and formatting. Auto-discovers language servers for TypeScript, Python, Go, Rust, and more.
@@ -80,7 +80,7 @@ Zero context-cost coding standards. Rules stay invisible until the model starts 
 
 | Command | Description |
 |---------|-------------|
-| `/implement {{task}}` | Full feature workflow |
+| `/implement {{task}}` | Full feature workflow (todo → worktree → QA → PR) |
 | `/review {{target}}` | Code review |
 | `/scout-and-plan {{goal}}` | Architecture analysis |
 | `/tasks` | Task management TUI |

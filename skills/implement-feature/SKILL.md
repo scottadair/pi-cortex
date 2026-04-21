@@ -89,16 +89,25 @@ Check that all planned changes were made and QA issues were addressed. Run `git 
   ```
   Then re-run QA (step 6), then re-run team lead validation. Allow at most 1 rework round — if still not approved, proceed to finalize with a note about remaining gaps.
 
-## 8. Commit & Merge
-Commit all changes in the worktree and merge the branch back:
+## 8. Commit, Push & Open PR
+Commit all changes in the worktree, push the branch, and open a pull request from the worktree directory:
 
 ```
 worktree commit todo_id="<id>" message="<feature name>: <brief summary>"
-worktree merge todo_id="<id>"
+(
+  cd "<worktree path>" &&
+  git push -u origin <branch-name> &&
+  GITHUB_TOKEN="" gh pr create \
+    --title "<type>(<scope>): <short description>" \
+    --body "<summary/details/test plan>" &&
+  GITHUB_TOKEN="" gh pr merge --auto --squash <branch-name>
+)
 ```
 
+Do **not** use `worktree merge` for normal delivery flow.
+
 ## 9. Finalize
-Update the todo status and clean up the worktree:
+Update the todo status and clean up the worktree after the PR is merged:
 
 ```
 todo update id="<id>" status="done"

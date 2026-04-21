@@ -20,7 +20,8 @@ export type ThreatCategory =
 	| "permissions"
 	| "exfiltration"
 	| "credentials"
-	| "injection";
+	| "injection"
+	| "workflow";
 
 export interface ThreatResult {
 	severity: Severity;
